@@ -1,0 +1,75 @@
+services:
+  postgres_db:
+    image: postgres:17-alpine
+    container_name: postgres_db
+    environment:
+      POSTGRES_DB: ecommerce
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+      POSTGRES_AGENT_PASSWORD_FILE: /run/secrets/agent_password
+      POSTGRES_REFRESHER_PASSWORD_FILE: /run/secrets/refresher_password
+    secrets:
+      - postgres_superuser_password
+      - agent_password
+      - refresher_password
+    ports:
+      - "127.0.0.1:5433:5432" # 5433 to avoid clashing with any local Postgres on 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./db/seed:/seed:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ecommerce"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  agent_backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: agent_backend
+    environment:
+      POSTGRES_HOST: postgres_db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ecommerce
+      POSTGRES_AGENT_PASSWORD_FILE: /run/secrets/agent_password
+      POSTGRES_REFRESHER_PASSWORD_FILE: /run/secrets/refresher_password
+      LLM_PROVIDER: mock # switch to "gemini" once secrets/gemini_api_key.txt is populated
+      CORS_ALLOW_ORIGINS: '["http://localhost:3000"]'
+    secrets:
+      - agent_password
+      - refresher_password
+    ports:
+      - "127.0.0.1:8000:8000" # must be host-reachable: the browser calls this directly (SSE)
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend_ui:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000 # browser-reachable URL, not the internal docker hostname
+    container_name: frontend_ui
+    ports:
+      - "3000:3000"
+    depends_on:
+      agent_backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+secrets:
+  postgres_superuser_password:
+    file: ./secrets/postgres_superuser_password.txt
+  agent_password:
+    file: ./secrets/agent_password.txt
+  refresher_password:
+    file: ./secrets/refresher_password.txt
+
+volumes:
+  pgdata:
