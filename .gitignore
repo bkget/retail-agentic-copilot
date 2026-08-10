@@ -1,0 +1,21 @@
+# secrets (checked-in .example files are the templates)
+secrets/*.txt
+!secrets/*.txt.example
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# node / next.js
+node_modules/
+.next/
+frontend/out/
+
+# env
+.env
+.env.local
+
+# editor/OS
+.DS_Store
