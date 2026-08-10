@@ -30,27 +30,27 @@ computed in Python - never guessed by the LLM - alongside a typed chart.
 
 ## Features
 
-- 🗣️ **Actually conversational** - greetings and "what can I ask?" are answered
+- **Actually conversational** - greetings and "what can I ask?" are answered
   directly, vague questions get a clarifying question instead of a guessed answer, and
   follow-ups ("only for 2024", "explain that again") reuse the prior turn's context.
-- 🔒 **AST-validated SQL guardrail** - every generated query is parsed with `sqlglot`,
+- **AST-validated SQL guardrail** - every generated query is parsed with `sqlglot`,
   checked against a table/function allow-list, and re-serialized before execution.
   Blocks CTE-wrapped DML, forces a row `LIMIT`, and never executes the model's raw text.
-- 🧮 **Deterministic, hallucination-safe narrative** - every number in the response is
+- **Deterministic, hallucination-safe narrative** - every number in the response is
   read directly from the SQL result set. The LLM's only job is generating the query;
   it never does the arithmetic.
-- 🧱 **PII-safe, two-tier semantic layer** - a pre-aggregated rollup view for common
+- **PII-safe, two-tier semantic layer** - a pre-aggregated rollup view for common
   questions and a row-level view for drill-downs, both built over a real 1M-row dataset
   with customer data excluded entirely.
-- ⚡ **Live streaming, not spinners** - Server-Sent Events push status → generated SQL →
+- **Live streaming, not spinners** - Server-Sent Events push status → generated SQL →
   narrative tokens → chart → timing metadata to the UI as each stage completes.
-- 🕵️ **Full audit trail** - every answer ships with the exact SQL executed, a
+- **Full audit trail** - every answer ships with the exact SQL executed, a
   guardrail/LLM/DB timing breakdown, and an OpenTelemetry trace ID.
-- 🔁 **Self-correcting generation** - a guardrail rejection or DB error is fed back to
+- **Self-correcting generation** - a guardrail rejection or DB error is fed back to
   the LLM for a bounded retry instead of failing the request outright.
-- 🧪 **Evaluated, not vibes-tested** - an Execution-Accuracy harness against a growing
+- **Evaluated, not vibes-tested** - an Execution-Accuracy harness against a growing
   golden question set gates CI at ≥90% before merge.
-- 🔌 **Swappable LLM backend** - ships with a deterministic rule-based router (no API
+- **Swappable LLM backend** - ships with a deterministic rule-based router (no API
   key needed to run the whole stack) or real Gemini via Google ADK, behind one interface.
 
 ## Tech Stack
@@ -68,7 +68,7 @@ computed in Python - never guessed by the LLM - alongside a typed chart.
 
 ## Architecture
 
-![Retail Agentic Copilot Architecture](./architecture.png)
+<img src="./architecture.png" alt="Retail Agentic Copilot Architecture" width="100%">
 
 **Request path:** browser → FastAPI `/api/query` (SSE) → intent classification →
 LLM SQL generation → AST guardrail → PostgreSQL (`agent_ro`, read-only) → deterministic
