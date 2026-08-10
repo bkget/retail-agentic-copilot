@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use dev secrets (ephemeral CI Postgres only - not real credentials)
+        run: |
+          cp secrets/postgres_superuser_password.txt.example secrets/postgres_superuser_password.txt
+          cp secrets/agent_password.txt.example secrets/agent_password.txt
+          cp secrets/refresher_password.txt.example secrets/refresher_password.txt
+
+      - name: Start postgres_db
+        run: docker compose up -d postgres_db
+
+      - name: Wait for full init (data load + semantic view build)
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec postgres_db psql -h 127.0.0.1 -U postgres -d ecommerce -c "SELECT 1" >/dev/null 2>&1; then
+              echo "postgres ready after ${i}0s"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "postgres did not become ready in time"
+          docker compose logs postgres_db
+          exit 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -e ".[dev]"
+
+      - name: Run backend test suite (excludes @pytest.mark.slow by default)
+        working-directory: backend
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5433"
+          POSTGRES_AGENT_PASSWORD_FILE: ${{ github.workspace }}/secrets/agent_password.txt
+          POSTGRES_REFRESHER_PASSWORD_FILE: ${{ github.workspace }}/secrets/refresher_password.txt
+        run: pytest -v
+
+      - name: Run eval harness (gates on Execution Accuracy)
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5433"
+          POSTGRES_AGENT_PASSWORD_FILE: ${{ github.workspace }}/secrets/agent_password.txt
+        run: python eval/eval_harness.py --provider mock --threshold 0.9
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - working-directory: frontend
+        run: npm install
+      - working-directory: frontend
+        run: npm run build
