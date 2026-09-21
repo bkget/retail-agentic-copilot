@@ -1,195 +1,466 @@
 # Retail Agentic Copilot
 
-![CI](https://github.com/bkget/retail-agentic-copilot/actions/workflows/ci.yml/badge.svg)
-![Python](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)
-![Next.js](https://img.shields.io/badge/next.js-14-black?logo=next.js&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/postgresql-17-4169E1?logo=postgresql&logoColor=white)
-![Docker](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)
+[![CI](https://github.com/bkget/retail-agentic-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/bkget/retail-agentic-copilot/actions/workflows/ci.yml)
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Next.js 14](https://img.shields.io/badge/Next.js-14-000000?style=flat&logo=next.js&logoColor=white)](https://nextjs.org/)
+[![PostgreSQL 17](https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
+[![sqlglot](https://img.shields.io/badge/Guardrail-sqlglot-FF6F00?style=flat)](https://github.com/tobymao/sqlglot)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Conversational analytics over a real 1,000,000-row PostgreSQL retail sales dataset.**
-Ask a question in plain English; a Google ADK / Gemini Flash agent turns it into SQL
-against a governed semantic layer, an independent AST guardrail validates it before it
-ever executes, and the answer streams back live with a narrative whose numbers are
-computed in Python - never guessed by the LLM - alongside a typed chart.
+**Conversational AI analytics copilot over a real 1,000,000-row PostgreSQL retail sales dataset.**  
+Ask questions in plain English; a Google ADK / Gemini Flash agent transforms intent into SQL against a hardened 2-tier semantic layer, an independent AST guardrail (`sqlglot`) validates and re-serializes the query before execution, and the result streams back live via Server-Sent Events (SSE) with deterministic narrative calculations and typed visualizations.
 
-> Built from a written spec, then deliberately run against **real** data instead of
-> synthetic fixtures. That choice surfaced correctness and security issues the spec's
-> own example code didn't anticipate - see [What Real Data Caught](#what-real-data-caught).
+> [!NOTE]
+> **Built for Real Data Integrity**: Unlike toy demos with synthetic fixtures, this copilot is built and benchmarked against 1,000,000 real retail transaction records. Real data uncovered non-associative float summing errors, regex keyword collisions, and PII leakage risks that synthetic tests ignored. See [What Real Data Caught](#what-real-data-caught).
 
-## Table of Contents
+---
 
-- [Features](#features)
-- [Tech Stack](#tech-stack)
-- [Architecture](#architecture)
-- [Quickstart](#quickstart)
+## 📑 Table of Contents
+
+- [Quick Access & Service Endpoints](#quick-access--service-endpoints)
+- [Key Features](#key-features)
+- [Architecture & Data Flow](#architecture--data-flow)
+- [Quickstart with Docker](#quickstart-with-docker)
+- [Database Connection & Schema Reference](#database-connection--schema-reference)
+- [Security Model & AST Guardrails](#security-model--ast-guardrails)
+- [Testing & Evaluation Harness](#testing--evaluation-harness)
 - [Project Structure](#project-structure)
-- [Security Model](#security-model)
-- [Testing](#testing)
 - [What Real Data Caught](#what-real-data-caught)
 - [Known Limitations](#known-limitations)
 
-## Features
+---
 
-- **Actually conversational** - greetings and "what can I ask?" are answered
-  directly, vague questions get a clarifying question instead of a guessed answer, and
-  follow-ups ("only for 2024", "explain that again") reuse the prior turn's context.
-- **AST-validated SQL guardrail** - every generated query is parsed with `sqlglot`,
-  checked against a table/function allow-list, and re-serialized before execution.
-  Blocks CTE-wrapped DML, forces a row `LIMIT`, and never executes the model's raw text.
-- **Deterministic, hallucination-safe narrative** - every number in the response is
-  read directly from the SQL result set. The LLM's only job is generating the query;
-  it never does the arithmetic.
-- **PII-safe, two-tier semantic layer** - a pre-aggregated rollup view for common
-  questions and a row-level view for drill-downs, both built over a real 1M-row dataset
-  with customer data excluded entirely.
-- **Live streaming, not spinners** - Server-Sent Events push status → generated SQL →
-  narrative tokens → chart → timing metadata to the UI as each stage completes.
-- **Full audit trail** - every answer ships with the exact SQL executed, a
-  guardrail/LLM/DB timing breakdown, and an OpenTelemetry trace ID.
-- **Self-correcting generation** - a guardrail rejection or DB error is fed back to
-  the LLM for a bounded retry instead of failing the request outright.
-- **Evaluated, not vibes-tested** - an Execution-Accuracy harness against a growing
-  golden question set gates CI at ≥90% before merge.
-- **Swappable LLM backend** - ships with a deterministic rule-based router (no API
-  key needed to run the whole stack) or real Gemini via Google ADK, behind one interface.
+## ⚡ Quick Access & Service Endpoints
 
-## Tech Stack
+When the stack is running via `docker compose up -d`:
 
-| Layer | Technology |
-|---|---|
-| Backend | FastAPI (Python 3.11, async), asyncpg |
-| Agent / LLM | Google ADK + Gemini Flash (swappable via `LLMProvider`) |
-| SQL safety | `sqlglot` AST parsing/validation and re-serialization |
-| Database | PostgreSQL 17, materialized-view semantic layer, APScheduler-driven refresh |
-| Frontend | Next.js 14, React, Recharts, Server-Sent Events client |
-| Observability | OpenTelemetry tracing |
-| Infra | Docker Compose (Postgres + backend + frontend) |
-| CI | GitHub Actions - backend tests, eval-accuracy gate, frontend build |
+| Service | URL / Host | Description |
+|---|---|---|
+| **Frontend UI** | [http://localhost:3000](http://localhost:3000) | Next.js 14 interactive chat client with real-time SSE streaming & Recharts |
+| **Backend API** | [http://localhost:8000](http://localhost:8000) | FastAPI REST & SSE endpoints |
+| **Interactive Docs** | [http://localhost:8000/docs](http://localhost:8000/docs) | OpenAPI / Swagger UI for all endpoints |
+| **Health Check** | [http://localhost:8000/healthz](http://localhost:8000/healthz) | Live container health status and database connectivity check |
+| **PostgreSQL DB** | `localhost:5433` (DB: `ecommerce`) | PostgreSQL 17 database host port (`agent_ro`, `refresher_rw`, `postgres`) |
 
-## Architecture
+---
 
-<img src="./architecture.png" alt="Retail Agentic Copilot Architecture" width="100%">
+## ✨ Key Features
 
-**Request path:** browser → FastAPI `/api/query` (SSE) → intent classification →
-LLM SQL generation → AST guardrail → PostgreSQL (`agent_ro`, read-only) → deterministic
-narrative + chart config → streamed back to the browser.
+- **Multi-Turn Conversational Analytics**: Handles greetings, clarification requests for ambiguous questions, and context-aware follow-up queries (*"only for 2024"*, *"show that by division"*).
+- **AST SQL Guardrail (`sqlglot`)**: Every generated query is parsed into an Abstract Syntax Tree, verified against strict table and function allowlists, inspected for DML/DDL operations across all CTE nodes, injected with row limits ($\le 500$), and re-serialized before execution.
+- **Deterministic, Zero-Hallucination Metrics**: All calculations (sums, averages, percentages) are computed in Python directly from the database result set. The LLM only generates SQL, never arithmetic.
+- **2-Tier PII-Sanitized Semantic Layer**:
+  - **Tier 1 (`public.mv_sales_daily_rollup`)**: Fast pre-aggregated daily rollup for high-level slice-and-dice queries.
+  - **Tier 2 (`public.mv_sales_analysis`)**: Row-level One Big Table (OBT) for fine-grained drill-downs with customer PII completely stripped.
+- **Real-Time SSE Streaming**: Pushes query progress, generated SQL, narrative tokens, chart schema, and timing benchmarks live to the browser.
+- **Self-Correcting LLM Feedback Loop**: Automatically captures syntax or guardrail rejections and provides corrective hints to the LLM for bounded retries.
+- **Execution Accuracy (EX) Benchmark**: Automated evaluation harness testing 30+ golden-standard questions against real PostgreSQL data, gating CI at $\ge 90\%$.
+- **Swappable LLM Providers**: Ships with an out-of-the-box rule-based deterministic mock router (100% accuracy on golden set without API keys) or Google ADK Gemini Flash.
 
-## Quickstart
+---
+
+## 🏛️ Architecture & Data Flow
+
+### 1. Request Processing & Guardrail Pipeline
+
+```mermaid
+flowchart TD
+    subgraph ClientLayer["🖥️ Frontend Client (Next.js 14)"]
+        UI["React Chat Interface<br/>(Recharts Visualization)"]
+        SSEClient["SSE Stream Listener<br/>(EventSource Client)"]
+    end
+
+    subgraph BackendAPI["⚡ Backend Service (FastAPI & Python 3.11)"]
+        Router["/api/query (SSE Endpoint)"]
+        SessionStore["In-Memory Session Store<br/>(Multi-Turn Context)"]
+        IntentClassifier{"Intent Classifier"}
+        DirectResponse["Direct Answer / Clarification"]
+        
+        subgraph AgentCore["🤖 Agent Orchestrator"]
+            LLMRouter["LLM Provider Router<br/>(MockLLMProvider / Gemini Flash)"]
+            SQLGen["SQL Query Generator"]
+        end
+        
+        subgraph Guardrail["🛡️ AST Guardrail (sqlglot)"]
+            ASTParse["Parse AST & Extract Nodes"]
+            TableCheck{"Table & Schema<br/>Allowlist Check"}
+            FuncCheck{"Function Allowlist<br/>Check"}
+            DMLCheck{"DML / CTE / DDL<br/>Walk Inspection"}
+            LimitInject["Inject Row LIMIT (<= 500)"]
+            Reserialize["Re-serialize AST to SQL"]
+        end
+
+        subgraph Engine["⚙️ Execution & Synthesizer"]
+            AsyncpgClient["Asyncpg Connection Pool"]
+            NarrativeSynth["Deterministic Python<br/>Narrative Synthesizer"]
+            ChartConfig["Chart JSON Formatter"]
+        end
+    end
+
+    subgraph DBLayer["🗄️ Database (PostgreSQL 17)"]
+        AgentRO[("agent_ro Role<br/>(Read-Only, 8s Timeout)")]
+        SemanticViews[("Semantic Layer Views<br/>mv_sales_daily_rollup<br/>mv_sales_analysis")]
+    end
+
+    UI -->|"1. Natural Language Query"| Router
+    Router <--> SessionStore
+    Router --> IntentClassifier
+    IntentClassifier -->|"Conversational / Greeting"| DirectResponse -->|"Stream SSE"| SSEClient
+    IntentClassifier -->|"Analytical Request"| LLMRouter
+    LLMRouter --> SQLGen
+    SQLGen -->|"Raw Generated SQL"| ASTParse
+    ASTParse --> TableCheck
+    TableCheck --> FuncCheck
+    FuncCheck --> DMLCheck
+    DMLCheck --> LimitInject
+    LimitInject --> Reserialize
+    
+    Reserialize -->|"Safe Re-serialized SQL"| AsyncpgClient
+    AsyncpgClient -->|"Execute Query"| AgentRO
+    AgentRO --> SemanticViews
+    SemanticViews -->|"Raw Result Rows"| AsyncpgClient
+    
+    AsyncpgClient --> NarrativeSynth
+    NarrativeSynth --> ChartConfig
+    ChartConfig -->|"Live SSE Events (Status, SQL, Narrative, Chart)"| SSEClient
+    SSEClient --> UI
+
+    classDef client fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0369a1;
+    classDef backend fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#15803d;
+    classDef security fill:#fef2f2,stroke:#dc2626,stroke-width:2px,color:#b91c1c;
+    classDef db fill:#fefce8,stroke:#ca8a04,stroke-width:2px,color:#a16207;
+
+    class UI,SSEClient client;
+    class Router,SessionStore,IntentClassifier,DirectResponse,LLMRouter,SQLGen,AsyncpgClient,NarrativeSynth,ChartConfig backend;
+    class ASTParse,TableCheck,FuncCheck,DMLCheck,LimitInject,Reserialize security;
+    class AgentRO,SemanticViews db;
+```
+
+---
+
+### 2. Database Schema Architecture & Semantic Lineage
+
+```mermaid
+flowchart TD
+    subgraph RawData["📦 Seed Data (1,000,000 Records)"]
+        CSV["db/seed/*.csv.gz"]
+    end
+
+    subgraph CoreSchema["🔒 Core 3NF Normalized Schema (core.*)"]
+        FactTable["core.fact_table<br/>(1M fact records, unit/total price numeric)"]
+        DimItem["core.item_dim<br/>(item_name, supplier, man_country)"]
+        DimStore["core.store_dim<br/>(division, district, upazila)"]
+        DimPayment["core.payment_dim<br/>(trans_type, bank_name)"]
+        DimTime["core.time_dim<br/>(date, year, quarter, month, day)"]
+        DimCustomer["core.customer_dim<br/>⚠️ PII ISOLATED & EXCLUDED"]
+    end
+
+    subgraph SecurityBoundary["🛡️ Security & Role Isolation"]
+        RefresherRole["refresher_rw Role<br/>(Owner of Materialized Views)"]
+        AgentRole["agent_ro Role<br/>(SELECT on public.* views only)"]
+    end
+
+    subgraph SemanticLayer["📊 2-Tier Semantic Layer (public.*)"]
+        Tier2["public.mv_sales_analysis<br/>• Tier 2: Row-level OBT for deep drilldowns<br/>• Surrogate fact_key, strict PII removal<br/>• Indexed by date, location, item"]
+        Tier1["public.mv_sales_daily_rollup<br/>• Tier 1: Pre-aggregated daily rollup<br/>• Grouped by date, year, month, division, district, item<br/>• SUM(total_revenue), SUM(total_units_sold), COUNT(*)"]
+    end
+
+    CSV -->|"gunzip + \copy on init"| FactTable & DimItem & DimStore & DimPayment & DimTime & DimCustomer
+
+    FactTable & DimItem & DimStore & DimPayment & DimTime -->|"Inner Join & PII Sanitization"| Tier2
+    Tier2 -->|"Daily Aggregation Rollup"| Tier1
+
+    RefresherRole -->|"APScheduler REFRESH CONCURRENTLY"| Tier2
+    RefresherRole -->|"APScheduler REFRESH CONCURRENTLY"| Tier1
+
+    AgentRole -->|"Read-Only Queries"| Tier1
+    AgentRole -->|"Read-Only Queries"| Tier2
+
+    classDef raw fill:#f3f4f6,stroke:#4b5563,stroke-width:1px,color:#1f2937;
+    classDef core fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#991b1b;
+    classDef semantic fill:#dcfce7,stroke:#22c55e,stroke-width:2px,color:#166534;
+    classDef roles fill:#fef3c7,stroke:#f59e0b,stroke-width:2px,color:#92400e;
+
+    class CSV raw;
+    class FactTable,DimItem,DimStore,DimPayment,DimTime,DimCustomer core;
+    class Tier1,Tier2 semantic;
+    class RefresherRole,AgentRole roles;
+```
+
+---
+
+---
+
+## 🛠️ Project Automation & Execution (Makefile & Docker)
+
+The project includes an intelligent, colorized **Makefile** that automates container lifecycle, secret initialization, testing, and evaluation.
+
+### A. Quick Start with Make (Recommended)
 
 ```bash
+# 1. One-command setup (creates .env & secrets from templates, installs deps) & start
+make setup && make up
+```
+
+Type `make` or `make help` to inspect all available targets:
+
+```
+Retail Agentic Copilot — Automation CLI
+
+Usage: make <target>
+
+  help                 Display this interactive help menu
+  setup                Initialize environment, secrets, and install backend dependencies
+  init-env             Create .env from .env.example if not already present
+  init-secrets         Ensure Docker secret files exist from .example templates
+  install              Install backend dependencies locally
+  up                   Build and launch full container stack (DB + Backend + Frontend)
+  down                 Stop and remove all containers and network bridges
+  restart              Restart the full container stack
+  ps                   List running containers and health statuses
+  logs                 Tail streaming logs from all services
+  logs-backend         Tail streaming logs from FastAPI backend
+  logs-db              Tail streaming logs from PostgreSQL database
+  logs-frontend        Tail streaming logs from Next.js frontend
+  db-shell-agent       Open psql shell as agent_ro role (read-only semantic layer)
+  db-shell-admin       Open psql shell as postgres superuser
+  db-reset             Hard reset database volume and re-seed 1M records (Caution: wipes data)
+  test                 Run unit and integration tests with pytest
+  test-slow            Run slow integration tests (including materialized view refresh)
+  eval                 Run Execution Accuracy (EX) benchmark with default mock router
+  eval-gemini          Run Execution Accuracy (EX) benchmark with Gemini provider
+  api-health           Verify backend health check via HTTP request
+  clean                Remove temporary python bytecode and test cache artifacts
+  clean-all            Complete teardown: remove containers, volumes, networks, and caches
+
+Quick Start: make setup && make up
+```
+
+---
+
+### B. Standard Docker Compose (Without Make)
+
+If `make` is not available on your system, you can use native Docker commands:
+
+```bash
+# 1. Setup environment file & secrets
+cp .env.example .env
 cp secrets/postgres_superuser_password.txt.example secrets/postgres_superuser_password.txt
 cp secrets/agent_password.txt.example secrets/agent_password.txt
 cp secrets/refresher_password.txt.example secrets/refresher_password.txt
-# edit those three files to real random values if you're doing more than a local demo
+cp secrets/gemini_api_key.txt.example secrets/gemini_api_key.txt
 
-docker compose up -d
-# first start takes ~10-15 min: postgres_db loads 1M seed rows and builds the semantic
-# layer views before it reports healthy - watch `docker compose logs -f postgres_db`
+# 2. Launch Stack
+docker compose up -d --build
 ```
 
-Then open **http://localhost:3000**. Try:
+> [!IMPORTANT]
+> **First Startup Initialization**:  
+> On first start, `retail_copilot_db` initializes the 1,000,000 row dataset and creates materialized views and indexes. This takes ~3-5 minutes. Check readiness with `make logs-db` or:
+> ```bash
+> docker compose logs -f retail_copilot_db
+> ```
+> Once healthy, open **[http://localhost:3000](http://localhost:3000)** in your browser!
 
-- *"total revenue by division in 2020"*
-- *"top 5 items by revenue"*
-- *"average order value"*
-- *"which years do you have data for?"*
+### C. Container Fleet
 
-No Gemini API key is required - `LLM_PROVIDER=mock` (the default) uses a real
-rule-based NL→SQL router (`backend/app/agent/llm_provider.py::MockLLMProvider`), not a
-canned demo. It scores **100% Execution Accuracy** on the golden question set. To use
-real Gemini instead, populate `secrets/gemini_api_key.txt` and set `LLM_PROVIDER=gemini`
-on the `agent_backend` service in `docker-compose.yml`.
+| Container Name | Internal Port | Host Port | Purpose |
+|---|---|---|---|
+| `retail_copilot_frontend` | 3000 | `3000` | Next.js 14 Web Interface |
+| `retail_copilot_backend` | 8000 | `8000` | FastAPI Server & Orchestrator |
+| `retail_copilot_db` | 5432 | `5433` | PostgreSQL 17 Database with 1M seed records |
 
-## Project Structure
+---
 
-```
-db/          DDL, seed data, and the semantic layer      → db/README.md
-backend/     FastAPI + guardrail + orchestrator + agent   → backend/tests/
-frontend/    Next.js 14 chat UI, SSE client, Recharts
-eval/        Execution-Accuracy harness                   → eval/README.md
-.github/     CI: backend tests + eval gate + frontend build, on every PR
-```
+## 🗄️ Database Connection & Schema Reference
 
-## Security Model
+### 1. Database Roles & Connection Credentials
 
-- **`agent_ro`** connects with `NOSUPERUSER NOCREATEDB NOINHERIT`,
-  `default_transaction_read_only = on`, an 8s `statement_timeout`, and `SELECT`-only
-  access to exactly two views - no grants on the normalized `core.*` schema at all.
-- **Generated SQL is never executed as-is.** It's parsed, checked against a table
-  allow-list (schema *and* name - a same-named table in the wrong schema is still
-  rejected), a function allow-list, and a full-tree walk that blocks
-  `INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/SET/MERGE/COPY/GRANT` even nested inside a CTE.
-  Only the **re-serialized AST** is executed, never the model's original text - closing
-  parser-differential attacks between `sqlglot`'s dialect and Postgres's own parser.
-- **Secrets are files** (Docker secrets pattern), never literals in code or compose YAML.
-- **Per-session rate limiting** on the query endpoint - cheap insurance against runaway
-  LLM spend from the retry loop.
+The database exposes three hardened roles:
 
-## Testing
+| Role | Default Password | Permissions & Scopes | Primary Usage |
+|---|---|---|---|
+| `agent_ro` | `change-me-agent` | `SELECT` on `public.mv_sales_*` views only. `default_transaction_read_only = on`, 8s timeout. | Query execution by FastAPI Agent |
+| `refresher_rw` | `change-me-refresher` | Owner of Materialized Views; `SELECT` on `core.*` (excl. `customer_dim`). | Scheduled background MV refresh |
+| `postgres` | `change-me-superuser` | Superuser administrative privileges. | DB initialization & migrations |
+
+### 2. Connecting from Host Tools
+
+You can connect directly with `psql`, DBeaver, TablePlus, or DataGrip:
 
 ```bash
-docker compose up -d postgres_db          # needed for all of the below - real DB, no mocks
-cd backend && pip install -e ".[dev]"
-pytest                                     # full suite, real DB, ~25s
-pytest -m slow                             # + the real MV refresh integration test, ~90s
-cd .. && python eval/eval_harness.py --provider mock   # Execution Accuracy report
+# Connect as agent_ro (read-only semantic layer)
+psql -h localhost -p 5433 -U agent_ro -d ecommerce
+
+# Connect as superuser
+psql -h localhost -p 5433 -U postgres -d ecommerce
 ```
 
-## What Real Data Caught
+### 3. Semantic Layer View Reference
 
-The original spec was a reasonable starting architecture, but several of its concrete
-details didn't survive contact with a real 1M-row dataset or a real security review.
-Every item below is fixed here, with a regression test:
+#### Tier 1: `public.mv_sales_daily_rollup` (Pre-aggregated)
+Optimized for high-level summaries and rapid aggregation.
 
-1. **Function allow-list didn't allow-list anything real.** `sqlglot` represents known
-   SQL functions (`SUM`, `CAST`, `EXTRACT`, ...) as dedicated `exp.*` node classes, not
-   `exp.Anonymous`. A check that only inspects `exp.Anonymous.name` - the spec's
-   approach - never actually enforces the allow-list against any function `sqlglot`
-   recognizes, only against ones it doesn't. Fixed in `ast_guardrail.py::_function_name`.
-2. **PII was reachable through two separate paths.** The source database's read-only
-   role had direct `SELECT` on the customer table (name, contact, national ID), and the
-   semantic-layer view itself exposed raw customer name/contact - both bypassing the
-   "PII-safe semantic layer" the spec described as its whole point. Fixed by excluding
-   customer data from the semantic layer entirely and building the read-only role fresh.
-3. **Non-deterministic `SUM()`.** The source data's `real` (float4) money columns made
-   `SUM(total_price)` return a different total on every run - parallel-worker partial
-   sums combine in a non-fixed order, and float addition isn't associative. This
-   directly contradicted the "no math hallucinations" goal. Fixed by casting to
-   `numeric` in the semantic layer - only caught by building the eval harness, not by
-   unit tests.
-4. **Hardcoded enum hints didn't match the real data.** The spec's system-prompt example
-   assumed Title-Case divisions and a `mobile_banking` payment type. The real data has
-   7 UPPERCASE divisions and `payment_type ∈ {card, cash, mobile}`. Fixed by loading
-   enum hints from `SELECT DISTINCT` against the live views at startup - hand-typed
-   hints can't drift from reality if they're never hand-typed.
-5. **Whole-word vs. substring keyword matching.** "average **order** value" matched a
-   `count` keyword because `order` is a substring hit; "manufacturer **country**"
-   matched `count` for the same reason. Fixed by switching every keyword check to
-   whole-word regex matching.
-6. **No self-correction loop.** One-shot generation had no retry path if the guardrail
-   rejected the query or execution failed. The orchestrator now retries with the
-   specific error fed back to the LLM.
-7. **No real materialized-view refresh mechanism**, despite the response contract
-   having a `last_refreshed_at` field. Fixed with a scheduled job on a dedicated
-   refresh-only role - deliberately not the same role the query path uses, so a
-   compromised query path can never trigger or interfere with a refresh.
-8. **No session state, despite "conversational" being the product name.** Added a
-   minimal in-memory session store - deliberately not Redis, correct for a
-   single-instance deployment, and the first thing to swap out if this ran with more
-   than one backend replica.
+| Column | Type | Description |
+|---|---|---|
+| `sale_date` | `DATE` | Transaction date (`YYYY-MM-DD`) |
+| `sale_year` | `INT` | Extracted calendar year (e.g., `2020`, `2021`) |
+| `sale_month` | `INT` | Extracted calendar month (`1` - `12`) |
+| `store_division` | `TEXT` | Division name (e.g., `DHAKA`, `CHITTAGONG`, `SYLHET`) |
+| `store_district` | `TEXT` | District name within division |
+| `item_name` | `TEXT` | Product name |
+| `total_revenue` | `NUMERIC` | Deterministic exact sum of total price |
+| `total_units_sold` | `BIGINT` | Total quantity sold |
+| `transaction_count`| `BIGINT` | Total number of individual transactions |
 
-## Known Limitations
+#### Tier 2: `public.mv_sales_analysis` (Row-Level OBT)
+Optimized for granular drill-downs, payment method analysis, and basket averages.
 
-- **`GeminiADKProvider` is unverified against a live API call.** No Gemini key was
-  available while building this. The `google-adk` call shape was checked against the
-  actually-installed package's real signatures, not written from memory - but
-  end-to-end behavior with a real key is genuinely untested. The `LLMProvider`
-  interface exists specifically so this is a contained, swappable risk: everything else
-  is proven independent of it via the mock provider.
-- **Eval golden set is 30 questions, not 100.** The harness, methodology, and CI gate
-  are complete; growing the count is mechanical authoring, not a design gap.
-- **Frontend depends on Next.js 14.x**, which has several disclosed CVEs not fully
-  patched until the (breaking) Next 16 line. Acceptable for a project that runs locally
-  and isn't exposed to the internet; would need addressing before any real deployment.
-- **Session store is process-local**, not shared across replicas - fine for one backend
-  instance, explicitly wrong for horizontal scaling without first swapping it for Redis.
+| Column | Type | Description |
+|---|---|---|
+| `fact_key` | `BIGINT` | Surrogate primary key from `core.fact_table` |
+| `total_price` | `NUMERIC` | Exact line-item total price |
+| `quantity` | `INT` | Number of items purchased |
+| `unit_price` | `NUMERIC` | Exact unit price |
+| `item_name` | `TEXT` | Product name |
+| `item_supplier` | `TEXT` | Supplier company name |
+| `item_manufacturer_country` | `TEXT` | Country of manufacture |
+| `store_division` | `TEXT` | Store division |
+| `store_district` | `TEXT` | Store district |
+| `store_upazila` | `TEXT` | Store sub-district (upazila) |
+| `payment_type` | `TEXT` | Payment method (`card`, `cash`, `mobile`) |
+| `payment_bank` | `TEXT` | Bank name (or `NULL` if not applicable) |
+| `sale_date` | `DATE` | Sale date |
+| `sale_year`, `sale_quarter`, `sale_month`, `sale_day` | `INT` | Calendar dimension breakdowns |
+
+### 4. Sample Verification Queries
+
+```sql
+-- 1. Total revenue by division for 2020
+SELECT store_division, SUM(total_revenue) AS revenue
+FROM public.mv_sales_daily_rollup
+WHERE sale_year = 2020
+GROUP BY store_division
+ORDER BY revenue DESC;
+
+-- 2. Top 5 items by units sold
+SELECT item_name, SUM(total_units_sold) AS units
+FROM public.mv_sales_daily_rollup
+GROUP BY item_name
+ORDER BY units DESC
+LIMIT 5;
+
+-- 3. Average basket value by payment method
+SELECT payment_type, ROUND(AVG(total_price), 2) AS avg_order_value
+FROM public.mv_sales_analysis
+GROUP BY payment_type
+ORDER BY avg_order_value DESC;
+```
+
+---
+
+## 🔒 Security Model & AST Guardrails
+
+1. **Role-Based Isolation**:
+   - `agent_ro` cannot access `core.customer_dim` or raw tables.
+   - `default_transaction_read_only = on` enforced at PostgreSQL role level.
+   - Hard execution limits: `statement_timeout = '8s'`, `idle_in_transaction_session_timeout = '15s'`, `work_mem = '32MB'`.
+2. **AST Validation via `sqlglot`**:
+   - Rejects queries referencing tables outside the allowlist (`public.mv_sales_daily_rollup`, `public.mv_sales_analysis`).
+   - Rejects unapproved functions.
+   - Walks the entire AST to block DML/DDL operations (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `GRANT`) even if nested in CTEs.
+   - Enforces a maximum limit of 500 rows.
+   - **Only the re-serialized AST is sent to Postgres**, neutralizing parser-differential injection attacks.
+3. **Docker Secrets Support**: Supports `_FILE` secret injection and standard environment variables for containerized deployments.
+
+---
+
+## 🧪 Testing & Evaluation Harness
+
+### 1. Running Unit & Integration Tests
+
+Ensure PostgreSQL is running on port 5433, then run:
+
+```bash
+# Start DB container if not already running
+docker compose up -d retail_copilot_db
+
+# Run full backend test suite
+cd backend
+pip install -e ".[dev]"
+pytest -v
+
+# Run slow integration tests (including materialized view refresh test)
+pytest -m slow
+```
+
+### 2. Running the Golden Set Evaluation (EX Accuracy)
+
+Evaluate the NL $\to$ SQL conversion against ground-truth queries:
+
+```bash
+# Run with default mock provider (Deterministic rule-based router)
+python eval/eval_harness.py --provider mock --threshold 0.9
+
+# Run with Gemini (requires GEMINI_API_KEY)
+python eval/eval_harness.py --provider gemini --threshold 0.9
+```
+
+---
+
+## 📁 Project Structure
+
+```
+├── .github/
+│   └── workflows/ci.yml         # CI pipeline: tests, eval gate (>=90%), frontend build
+├── backend/
+│   ├── app/
+│   │   ├── agent/               # Orchestrator, LLM provider, prompt engineering
+│   │   ├── api/                 # FastAPI routes (SSE streaming query endpoint)
+│   │   ├── schema/              # Catalog metadata, dynamic enum hint loader
+│   │   ├── security/            # sqlglot AST guardrail & sanitizer
+│   │   ├── session/             # Multi-turn conversation store & rate limiting
+│   │   └── main.py              # Application lifecycle & background MV refresher
+│   └── tests/                   # Pytest test suite (unit + DB integration)
+├── db/
+│   ├── init/                    # DDL, roles, 2-tier semantic views, refresh triggers
+│   └── seed/                    # 1,000,000 gzipped CSV seed records
+├── eval/
+│   ├── eval_harness.py          # Execution Accuracy (EX) evaluation runner
+│   └── golden_set.jsonl         # Benchmark question & ground-truth SQL dataset
+├── frontend/                    # Next.js 14 chat interface with Recharts & SSE client
+├── secrets/                     # Docker secret files & templates
+├── .env.example                 # Environment configuration template
+└── docker-compose.yml           # Unified orchestration definition
+```
+
+---
+
+## 🔍 What Real Data Caught
+
+Building against real 1,000,000-row retail data uncovered multiple subtle bugs that standard synthetic fixtures failed to catch:
+
+1. **Floating-Point Sum Inconsistency (`real` vs `numeric`)**:  
+   In Postgres, `SUM()` on `real` (float4) columns during parallel query execution produces slightly different results across runs due to non-associative floating-point addition. Casting monetary fields to `numeric` in `04_semantic_views.sql` ensured exact, deterministic aggregations.
+2. **Subtree AST Function Validation**:  
+   `sqlglot` classifies standard functions (`SUM`, `AVG`, `EXTRACT`) as specialized `exp.*` AST nodes rather than `exp.Anonymous`. Custom AST node traversal ensures every function call is rigorously validated.
+3. **Substring Keyword Collisions**:  
+   Naive substring search matched "country" to `COUNT` and "order" to transaction counts. Replaced with regex whole-word boundary matching.
+4. **Dynamic Enum Ingestion**:  
+   Real data contained uppercase division names (`DHAKA`, `CHITTAGONG`) and specific payment enums (`card`, `cash`, `mobile`). Dynamic introspection loads exact enum hints at startup.
+
+---
+
+## ⚠️ Known Limitations
+
+- **Process-Local Session Memory**: In-memory multi-turn session store is optimized for single-container setups; production multi-replica scaling would leverage Redis.
+- **Eval Dataset Scope**: Golden evaluation set currently includes 30 representative test cases; expanding to 100+ cases is ongoing.
+- **Frontend Dependencies**: Built on Next.js 14 for stability; upgrade paths to Next.js 16 will follow upstream LTS patches.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

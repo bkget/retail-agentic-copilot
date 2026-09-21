@@ -1,65 +1,74 @@
 services:
-  postgres_db:
+  retail_copilot_db:
     image: postgres:17-alpine
-    container_name: postgres_db
+    container_name: retail_copilot_db
     environment:
-      POSTGRES_DB: ecommerce
-      POSTGRES_USER: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-ecommerce}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
       POSTGRES_AGENT_PASSWORD_FILE: /run/secrets/agent_password
       POSTGRES_REFRESHER_PASSWORD_FILE: /run/secrets/refresher_password
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-}
+      POSTGRES_AGENT_PASSWORD: ${POSTGRES_AGENT_PASSWORD:-}
+      POSTGRES_REFRESHER_PASSWORD: ${POSTGRES_REFRESHER_PASSWORD:-}
     secrets:
       - postgres_superuser_password
       - agent_password
       - refresher_password
     ports:
-      - "127.0.0.1:5433:5432" # 5433 to avoid clashing with any local Postgres on 5432
+      - "${POSTGRES_HOST_PORT:-5433}:5432" # 5433 to avoid clashing with local Postgres on 5432
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
       - ./db/seed:/seed:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ecommerce"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ecommerce}"]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 30s
     restart: unless-stopped
 
-  agent_backend:
+  retail_copilot_backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: agent_backend
+    container_name: retail_copilot_backend
     environment:
-      POSTGRES_HOST: postgres_db
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: ecommerce
+      POSTGRES_HOST: retail_copilot_db
+      POSTGRES_PORT: ${POSTGRES_INTERNAL_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-ecommerce}
       POSTGRES_AGENT_PASSWORD_FILE: /run/secrets/agent_password
       POSTGRES_REFRESHER_PASSWORD_FILE: /run/secrets/refresher_password
-      LLM_PROVIDER: mock # switch to "gemini" once secrets/gemini_api_key.txt is populated
-      CORS_ALLOW_ORIGINS: '["http://localhost:3000"]'
+      POSTGRES_AGENT_PASSWORD: ${POSTGRES_AGENT_PASSWORD:-}
+      POSTGRES_REFRESHER_PASSWORD: ${POSTGRES_REFRESHER_PASSWORD:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_API_KEY_FILE: /run/secrets/gemini_api_key
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-lite-latest}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-'["http://localhost:3000"]'}
     secrets:
       - agent_password
       - refresher_password
+      - gemini_api_key
     ports:
-      - "127.0.0.1:8000:8000" # must be host-reachable: the browser calls this directly (SSE)
+      - "${BACKEND_HOST_PORT:-8000}:8000" # Host reachable port for browser SSE streams
     depends_on:
-      postgres_db:
+      retail_copilot_db:
         condition: service_healthy
     restart: unless-stopped
 
-  frontend_ui:
+  retail_copilot_frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: http://localhost:8000 # browser-reachable URL, not the internal docker hostname
-    container_name: frontend_ui
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000} # Browser reachable API URL
+    container_name: retail_copilot_frontend
     ports:
-      - "3000:3000"
+      - "${FRONTEND_HOST_PORT:-3000}:3000"
     depends_on:
-      agent_backend:
+      retail_copilot_backend:
         condition: service_healthy
     restart: unless-stopped
 
@@ -70,6 +79,8 @@ secrets:
     file: ./secrets/agent_password.txt
   refresher_password:
     file: ./secrets/refresher_password.txt
+  gemini_api_key:
+    file: ./secrets/gemini_api_key.txt
 
 volumes:
   pgdata:

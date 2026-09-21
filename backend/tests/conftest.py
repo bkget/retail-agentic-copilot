@@ -1,5 +1,5 @@
 """Integration test fixtures. These tests exercise the real semantic layer, so they
-require `docker compose up -d postgres_db` to be running first (see repo README). They
+require `docker compose up -d retail_copilot_db` to be running first (see repo README). They
 connect through the same `agent_ro` role and the same secret files the app itself uses -
 no credentials are duplicated/hardcoded here.
 """

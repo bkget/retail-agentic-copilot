@@ -9,7 +9,7 @@ not a mock of the pipeline - both queries hit the real Postgres semantic layer.
 ## Running it
 
 ```bash
-# from repo root, with postgres_db running (docker compose up -d postgres_db)
+# from repo root, with retail_copilot_db running (docker compose up -d retail_copilot_db)
 export POSTGRES_HOST=localhost POSTGRES_PORT=5433 \
        POSTGRES_AGENT_PASSWORD_FILE=./secrets/agent_password.txt
 python eval/eval_harness.py --provider mock       # 30/30 (100%) as of this writing

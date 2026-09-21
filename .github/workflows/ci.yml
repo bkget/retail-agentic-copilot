@@ -17,20 +17,20 @@ jobs:
           cp secrets/agent_password.txt.example secrets/agent_password.txt
           cp secrets/refresher_password.txt.example secrets/refresher_password.txt
 
-      - name: Start postgres_db
-        run: docker compose up -d postgres_db
+      - name: Start retail_copilot_db
+        run: docker compose up -d retail_copilot_db
 
       - name: Wait for full init (data load + semantic view build)
         run: |
           for i in $(seq 1 60); do
-            if docker exec postgres_db psql -h 127.0.0.1 -U postgres -d ecommerce -c "SELECT 1" >/dev/null 2>&1; then
+            if docker exec retail_copilot_db psql -h 127.0.0.1 -U postgres -d ecommerce -c "SELECT 1" >/dev/null 2>&1; then
               echo "postgres ready after ${i}0s"
               exit 0
             fi
             sleep 10
           done
           echo "postgres did not become ready in time"
-          docker compose logs postgres_db
+          docker compose logs retail_copilot_db
           exit 1
 
       - uses: actions/setup-python@v5
