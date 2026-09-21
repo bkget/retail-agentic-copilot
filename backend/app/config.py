@@ -28,12 +28,22 @@ class Settings(BaseSettings):
     refresher_db_user: str = "refresher_rw"
 
     llm_provider: str = "mock"  # "mock" | "gemini"
-    gemini_model: str = "gemini-2.0-flash"
+    # Pinned version strings kept going stale within this same session -
+    # gemini-2.0-flash was retired, gemini-3.6-flash (current flagship) hit its
+    # free-tier quota fast, and gemini-2.5-flash-lite turned out to be closed to new
+    # API keys/projects despite still being listed by the models.list() endpoint (only
+    # a live generateContent call proved that, not the listing). "-latest" is Google's
+    # own floating alias that always resolves to their current recommended model for
+    # that tier, so it doesn't go stale the way a pinned version does - verified live
+    # against this project's actual key (client.models.generate_content), not assumed.
+    # "-lite" for the more generous free-tier quota. Overridable via GEMINI_MODEL
+    # without a rebuild if this needs to change again.
+    gemini_model: str = "gemini-flash-lite-latest"
 
     cors_allow_origins: list[str] = ["http://localhost:3000"]
 
     session_ttl_seconds: int = 1800
-    session_max_turns: int = 6
+    session_max_turns: int = 10
 
     rate_limit_capacity: int = 10
     rate_limit_refill_per_minute: int = 10

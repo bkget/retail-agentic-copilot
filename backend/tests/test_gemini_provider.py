@@ -1,16 +1,16 @@
 """Only tests the parts of GeminiADKProvider that don't require a live API key: the
-markdown-fence stripping helper, the classifier-reply parser, and the fail-fast
-behavior when no key is configured. Actual generation against the real Gemini API is
-untested in this environment - see the module docstring in app/agent/gemini_provider.py.
+markdown-fence stripping helper, the classifier-reply parser, the mapper-reply parser,
+and the fail-fast behavior when no key is configured. Actual generation against the
+real Gemini API is untested in this environment - see the module docstring in
+app/agent/gemini_provider.py.
 """
-
-import os
 
 import pytest
 
 from app.agent.gemini_provider import (
     GeminiADKProvider,
     _parse_classifier_reply,
+    _parse_mapper_reply,
     _strip_markdown_fence,
 )
 from app.agent.llm_provider import Intent
@@ -33,26 +33,39 @@ def test_strip_markdown_fence(raw, expected):
 @pytest.mark.parametrize(
     "reply,expected_intent",
     [
-        ("GREETING: Hi there!", Intent.GREETING),
-        ("HELP: You can ask about revenue...", Intent.HELP),
-        ("CLARIFY: Which time period?", Intent.CLARIFICATION_NEEDED),
-        ("EXPLAIN", Intent.EXPLAIN_PREVIOUS),
-        ("explain", Intent.EXPLAIN_PREVIOUS),
-        ("COVERAGE", Intent.DATA_COVERAGE),
-        ("coverage", Intent.DATA_COVERAGE),
-        ("QUERY", Intent.QUERY),
-        ("  query  ", Intent.QUERY),
-        ("something the model said that doesn't match any prefix", Intent.QUERY),
+        ("GREETING", Intent.GREETING),
+        ("greeting", Intent.GREETING),
+        ("SCHEMA_INFO", Intent.SCHEMA_INFO),
+        ("CLARIFICATION", Intent.CLARIFICATION),
+        ("UNKNOWN", Intent.UNKNOWN),
+        ("DATABASE_QUERY", Intent.DATABASE_QUERY),
+        ("  database_query  ", Intent.DATABASE_QUERY),
+        ("DATABASE_QUERY.", Intent.DATABASE_QUERY),
+        ("something the model said that doesn't match any label", Intent.DATABASE_QUERY),
     ],
 )
 def test_parse_classifier_reply(reply, expected_intent):
-    result = _parse_classifier_reply(reply)
-    assert result.intent == expected_intent
+    assert _parse_classifier_reply(reply) == expected_intent
 
 
-def test_parse_classifier_reply_extracts_text_after_prefix():
-    result = _parse_classifier_reply("CLARIFY: Which time period would you like?")
-    assert result.clarifying_question == "Which time period would you like?"
+@pytest.mark.parametrize(
+    "reply,expected_metric,expected_dimension",
+    [
+        ("METRIC: total_revenue\nDIMENSION: store_division", "total_revenue", "store_division"),
+        ("METRIC: total_revenue\nDIMENSION: NONE", "total_revenue", None),
+        ("METRIC: NONE\nDIMENSION: NONE", None, None),
+        ("metric: avg_revenue\ndimension: store_district", "avg_revenue", "store_district"),
+        # Out-of-vocabulary values are rejected, not passed through - this is the
+        # closed-vocabulary validation the mapper prompt relies on to avoid hallucinated
+        # column names ever reaching SQL generation.
+        ("METRIC: made_up_alias\nDIMENSION: store_division", None, "store_division"),
+        ("not the expected format at all", None, None),
+    ],
+)
+def test_parse_mapper_reply(reply, expected_metric, expected_dimension):
+    metric, dimension = _parse_mapper_reply(reply)
+    assert metric == expected_metric
+    assert dimension == expected_dimension
 
 
 def test_raises_without_api_key(monkeypatch):

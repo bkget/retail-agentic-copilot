@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from opentelemetry.trace import Status, StatusCode
 from pydantic import BaseModel
 
-from app.agent.llm_provider import ConversationTurn, LLMProvider, MockLLMProvider
+from app.agent.llm_provider import LLMProvider, MockLLMProvider
 from app.agent.orchestrator import Orchestrator, OrchestratorError
 from app.config import get_settings
 from app.db.pool import create_agent_pool, create_refresher_pool
@@ -48,8 +50,10 @@ async def lifespan(app: FastAPI):
     app.state.agent_pool = await create_agent_pool(settings)
     app.state.catalog = await load_catalog(app.state.agent_pool)
     app.state.llm_provider = _build_llm_provider(settings.llm_provider)
-    app.state.orchestrator = Orchestrator(app.state.llm_provider, app.state.agent_pool)
     app.state.session_store = SessionStore(settings.session_ttl_seconds, settings.session_max_turns)
+    app.state.orchestrator = Orchestrator(
+        app.state.llm_provider, app.state.agent_pool, app.state.session_store
+    )
     app.state.rate_limiter = TokenBucketRateLimiter(
         settings.rate_limit_capacity, settings.rate_limit_refill_per_minute
     )
@@ -70,6 +74,8 @@ async def lifespan(app: FastAPI):
     await app.state.refresher_pool.close()
     await app.state.agent_pool.close()
 
+
+HEARTBEAT_INTERVAL_SECONDS = 8
 
 app = FastAPI(title="Enterprise Agentic Data Copilot", lifespan=lifespan)
 
@@ -92,6 +98,29 @@ async def healthz(request: Request):
 class QueryRequest(BaseModel):
     question: str
     session_id: str = "anonymous"
+
+
+@app.get("/api/session/{session_id}/history")
+async def session_history(session_id: str, request: Request):
+    """Lets the frontend rehydrate a returning session's chat log on page load - the
+    SessionStore already keeps this server-side (see app/session/store.py) for
+    resolving follow-ups, but nothing previously exposed it for the UI to render.
+    Only question/sql/row_count/narrative are persisted per turn (no chart config or
+    per-request timing metrics), so a rehydrated turn shows its text but not its
+    chart - a disclosed, minor fidelity gap, not a bug."""
+    app_state = request.app.state
+    session = app_state.session_store.get_session(session_id)
+    return {
+        "turns": [
+            {
+                "question": turn.question,
+                "sql": turn.sql,
+                "row_count": turn.row_count,
+                "narrative": turn.narrative_text,
+            }
+            for turn in session.history
+        ]
+    }
 
 
 @app.post("/api/query")
@@ -119,30 +148,60 @@ async def query(payload: QueryRequest, request: Request):
                 catalog = await load_catalog(app_state.agent_pool)
                 app_state.catalog = catalog
 
-            history: list[ConversationTurn] = app_state.session_store.get_history(payload.session_id)
-
-            # Intent classification happens inside orchestrator.answer() itself - a
-            # single call now covers "is this even a query?" through execution, so
-            # there's no natural point between classify and generate to narrate
-            # separately; "thinking" covers both.
+            # classify_input, get_session, map_terms_to_columns, generate_sql, run_sql
+            # and update_session all happen inside orchestrator.answer() itself - a
+            # single call now covers "is this even a query?" through execution and
+            # session persistence, so there's no natural point between classify and
+            # generate to narrate separately; "thinking" covers both.
             yield status_event("thinking")
-            try:
-                result = await app_state.orchestrator.answer(
-                    payload.question, catalog, history, max_retries=settings.max_generation_retries
+            answer_task = asyncio.ensure_future(
+                app_state.orchestrator.answer(
+                    payload.question,
+                    catalog,
+                    payload.session_id,
+                    max_retries=settings.max_generation_retries,
                 )
+            )
+            try:
+                # A real LLM provider can make several sequential model calls per turn
+                # (classify, map terms, generate SQL - observed 15-40+ seconds total)
+                # with nothing otherwise sent on the wire in that window. A long silent
+                # gap on a held-open connection reads as dead to browsers, proxies, and
+                # Docker's own port-forwarding layer - this produced a hard "network
+                # error" on the client that had nothing to do with the model being
+                # slow, only with the connection looking abandoned. A bare SSE comment
+                # line is valid per the spec and silently ignored by any conformant
+                # parser (this app's own sseClient.ts requires both an `event:` and a
+                # `data:` line to treat something as a frame, so a comment-only line
+                # never reaches the UI), so it keeps the connection alive with zero
+                # visible effect.
+                while not answer_task.done():
+                    _, pending = await asyncio.wait({answer_task}, timeout=HEARTBEAT_INTERVAL_SECONDS)
+                    if pending:
+                        yield ": heartbeat\n\n"
+                result = answer_task.result()
             except OrchestratorError as exc:
                 yield error_event(str(exc))
                 return
-
-            app_state.session_store.append_turn(
-                payload.session_id,
-                ConversationTurn(
-                    question=payload.question,
-                    sql=result.sql_executed,
-                    row_count=result.row_count,
-                    narrative_text=result.narrative_text,
-                ),
-            )
+            except Exception as exc:
+                # Anything the LLM provider itself raises directly - a real API call
+                # can fail with a quota/rate-limit error, a transient network error, a
+                # safety-filter block, etc. - isn't wrapped in OrchestratorError (that's
+                # reserved for "generation ran, but produced no valid/executable SQL
+                # after retries"). Without this, such an error propagated as an
+                # unhandled exception mid-stream, abruptly closing the connection with
+                # no clean error frame - a bare, uninformative "network error" on the
+                # client for what was actually a clean, nameable failure the whole
+                # time. Logged with the trace_id (not re-raised) so it's diagnosable
+                # server-side without leaking provider-specific error text to the
+                # client.
+                root_span.record_exception(exc)
+                root_span.set_status(Status(StatusCode.ERROR, "unhandled LLM provider error"))
+                yield error_event(
+                    "The AI provider is temporarily unavailable or over its usage "
+                    "limit. Please try again in a moment."
+                )
+                return
 
             is_query = result.response_type == "query"
 

@@ -4,10 +4,11 @@
 
 export interface VisualizationConfig {
   render_chart: boolean;
-  chart_type: "bar" | "line" | null;
+  chart_type: "bar" | "line" | "table" | null;
   title: string | null;
-  x_axis_key: string | null;
-  y_axis_key: string | null;
+  x_axis_key: string | null; // bar/line only
+  y_axis_key: string | null; // bar/line only
+  columns: string[]; // table only: header order
   data: Record<string, string | number | null>[];
 }
 

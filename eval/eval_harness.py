@@ -40,6 +40,7 @@ from app.agent.orchestrator import Orchestrator, OrchestratorError  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.schema.catalog import load_catalog  # noqa: E402
 from app.security.ast_guardrail import GuardrailViolation, validate_and_reserialize_sql  # noqa: E402
+from app.session.store import SessionStore  # noqa: E402
 
 GOLDEN_SET_PATH = Path(__file__).resolve().parent / "golden_set.jsonl"
 FLOAT_TOLERANCE = 0.01
@@ -114,12 +115,17 @@ async def run_eval(provider_name: str) -> list[EvalResult]:
     try:
         catalog = await load_catalog(pool)
         llm = await _build_llm_provider(provider_name)
-        orchestrator = Orchestrator(llm, pool)
+        session_store = SessionStore(ttl_seconds=1800, max_turns=10)
+        orchestrator = Orchestrator(llm, pool, session_store)
 
         cases = load_golden_set()
         results: list[EvalResult] = []
 
         for case in cases:
+            # Each golden-set question gets its own session - these are independent,
+            # standalone questions, not a conversation, so there's nothing to inherit
+            # between them and no reason to share state.
+            session_id = f"eval-{case.id}"
             try:
                 truth_sql = validate_and_reserialize_sql(case.ground_truth_sql)
             except GuardrailViolation as exc:
@@ -130,7 +136,7 @@ async def run_eval(provider_name: str) -> list[EvalResult]:
                 truth_rows = await conn.fetch(truth_sql)
 
             try:
-                query_result = await orchestrator.answer(case.question, catalog, [], max_retries=2)
+                query_result = await orchestrator.answer(case.question, catalog, session_id, max_retries=2)
             except OrchestratorError as exc:
                 results.append(EvalResult(case, False, f"orchestrator failed: {exc}", None))
                 continue

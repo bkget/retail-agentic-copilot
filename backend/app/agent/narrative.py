@@ -2,16 +2,28 @@
 directly from the SQL result set - never re-computed or paraphrased by an LLM - so the
 narrative can never say a number that isn't literally in the data the guardrailed query
 returned. This is the mechanism behind the spec's "no math hallucinations" requirement.
+Any aggregate stated here (a total, a range, a year-over-year delta) is real arithmetic
+computed in this module from `rows`, not an LLM's estimate.
 
 Works generically off the shape of the result set (which columns are numeric vs.
 categorical) rather than needing structured intent from the SQL-generation step, so it
-works the same whether SQL came from MockLLMProvider or a real LLM.
+works the same whether SQL came from MockLLMProvider or a real LLM. `resolved` (the
+already-resolved query) is only consulted for scope context (filters/years/top-N) that
+isn't otherwise recoverable from the result set alone - e.g. a WHERE-only filter that
+narrowed the data but left no trace in which columns came back.
+
+Deliberately prose, not a bulleted "Metric/Breakdown/Filters" preamble - that format
+read as a raw dump of internal state rather than an answer. The same information (what
+was measured, how it was broken down, what it was filtered to) is woven into the
+opening sentence instead.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Number
+
+from app.agent.llm_provider import ResolvedQuery
 
 CURRENCY = "$"
 
@@ -75,7 +87,22 @@ def _format_value(value: float, unit: str, decimals: int) -> str:
     return f"{value:,.{decimals}f}{_UNIT_SUFFIX[unit]}"
 
 
-def build_narrative(question: str, columns: list[str], rows: list[dict]) -> NarrativeResult:
+def _describe_scope(resolved: ResolvedQuery) -> str:
+    """A natural trailing clause describing the filters/time range in play - e.g.
+    " for Dhaka" or " for 2019 and 2020" - the prose replacement for the old separate
+    "Filters: ..." bullet line. Empty string (not a dangling " for") when there's
+    nothing to describe."""
+    parts: list[str] = [v for f in resolved.filters for v in f.values]
+    if len(resolved.years) >= 2:
+        parts.append(" and ".join(str(y) for y in resolved.years))
+    elif resolved.year is not None:
+        parts.append(str(resolved.year))
+    if not parts:
+        return ""
+    return " for " + ", ".join(parts)
+
+
+def build_narrative(resolved: ResolvedQuery, columns: list[str], rows: list[dict]) -> NarrativeResult:
     if not rows:
         return NarrativeResult(
             text="No rows matched this query.",
@@ -122,22 +149,73 @@ def build_narrative(question: str, columns: list[str], rows: list[dict]) -> Narr
 
     currency_prefix = CURRENCY if is_currency else ""
     label = _metric_label(metric_col)
+    scope = _describe_scope(resolved)
 
     if not categorical_cols or len(rows) == 1:
         total = sum(values)
-        text = f"The {label} is {currency_prefix}{fmt(total)}."
+        text = f"The {label}{scope} is {currency_prefix}{fmt(total)}."
         return NarrativeResult(text=text, formatting=formatting)
 
-    dim_col = categorical_cols[0]
-    dim_label = dim_col.replace("_", " ")
+    # Handles 1+ categorical columns uniformly - a single column (the common case)
+    # degenerates to exactly the old single-dimension wording; 2+ columns (e.g. a
+    # multi-year comparison also broken down by quarter) get a combined label like
+    # "2020 Q4" instead of silently describing only the first column and ignoring the
+    # rest, which is what used to happen when categorical_cols[0] was the only column
+    # ever consulted.
+    dim_label = " and ".join(c.replace("_", " ") for c in categorical_cols)
+
+    def combo_label(row: dict) -> str:
+        return " ".join(str(row[c]) for c in categorical_cols)
+
     ranked = sorted(rows, key=lambda r: (r.get(metric_col) or 0), reverse=True)
+    n = len(ranked)
     leader = ranked[0]
-    text = (
-        f"Looking at {label} by {dim_label}, **{leader[dim_col]}** leads with "
-        f"{currency_prefix}{fmt(leader[metric_col])}"
-    )
-    if len(ranked) > 1:
-        runner_up = ranked[1]
-        text += f", followed by **{runner_up[dim_col]}** with {currency_prefix}{fmt(runner_up[metric_col])}"
-    text += "."
-    return NarrativeResult(text=text, formatting=formatting)
+
+    top_n_phrase = f"the top {resolved.top_n} " if resolved.top_n else ""
+    sentences = [
+        f"Looking at {label} by {dim_label}{scope}, {top_n_phrase}results show "
+        f"**{combo_label(leader)}** leading with {currency_prefix}{fmt(leader[metric_col])}"
+        + (
+            f", followed by **{combo_label(ranked[1])}** at "
+            f"{currency_prefix}{fmt(ranked[1][metric_col])}"
+            if n > 1
+            else ""
+        )
+        + "."
+    ]
+
+    # Extra context beyond the top 2 - a total and a range - only once there are
+    # enough rows for "the top 2" to have left something out worth mentioning.
+    if n >= 3:
+        lowest = ranked[-1]
+        total = sum(values)
+        sentences.append(
+            f"Across all {n} results, {label} totals {currency_prefix}{fmt(total)}, "
+            f"ranging from {currency_prefix}{fmt(leader[metric_col])} down to "
+            f"{currency_prefix}{fmt(lowest[metric_col])} for **{combo_label(lowest)}**."
+        )
+
+    # Year-over-year note when sale_year is one of the compared dimensions and the
+    # result isn't a top-N slice (a top-N sum wouldn't represent true year totals, so
+    # it's deliberately skipped in that case rather than stating a misleading figure).
+    if "sale_year" in categorical_cols and len(categorical_cols) >= 2 and len(resolved.years) >= 2 and not resolved.top_n:
+        by_year: dict[int, float] = {}
+        for r in rows:
+            y, v = r.get("sale_year"), r.get(metric_col)
+            if y is not None and v is not None:
+                by_year[y] = by_year.get(y, 0.0) + float(v)
+        if len(by_year) == 2:
+            (y1, v1), (y2, v2) = sorted(by_year.items())
+            trend = ""
+            if v1:
+                pct = (v2 - v1) / v1 * 100
+                trend = f" - {'up' if pct >= 0 else 'down'} {abs(pct):.1f}%"
+            # label.capitalize() rather than a prefixed "Total {label}" - the known
+            # metric labels already start with "total" ("total revenue", "total units
+            # sold"), so prefixing another one produced "Total total revenue was...".
+            sentences.append(
+                f"{label.capitalize()} was {currency_prefix}{fmt(v1)} in {y1} and "
+                f"{currency_prefix}{fmt(v2)} in {y2}{trend}."
+            )
+
+    return NarrativeResult(text=" ".join(sentences), formatting=formatting)

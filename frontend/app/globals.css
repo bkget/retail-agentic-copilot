@@ -65,7 +65,71 @@ body {
 .app-shell {
   max-width: 860px;
   margin: 0 auto;
-  padding: 32px 20px 80px;
+  padding: 56px 20px 80px;
+}
+
+/* Fixed top-right theme switcher - a segmented pair of tabs, not a page-content element,
+   so it stays put regardless of scroll position or content width. */
+.theme-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 50;
+  display: flex;
+  gap: 2px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+
+.theme-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.1s ease;
+}
+
+.theme-toggle-btn:hover {
+  background: var(--gridline);
+  color: var(--text-primary);
+}
+
+.theme-toggle-btn:active {
+  transform: scale(0.95);
+}
+
+.theme-toggle-btn.is-active {
+  background: var(--series-1);
+  color: #ffffff;
+}
+
+.theme-toggle-btn.is-active:hover {
+  filter: brightness(1.08);
+}
+
+.theme-toggle-btn:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
+}
+
+@media (max-width: 480px) {
+  .theme-toggle-label {
+    display: none;
+  }
 }
 
 .app-title {
@@ -83,20 +147,83 @@ body {
 .message-list {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 28px;
   margin-bottom: 24px;
 }
 
-.message-card {
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* User prompt: pushed right and given a light, neutral bubble - deliberately not the
+   accent color, so it reads as "lightweight" input rather than a call-to-action. */
+.user-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* Pin toggle sitting immediately left of the bubble it belongs to (the row is
+   right-aligned, so this and the bubble pack together as one unit). Hidden until the
+   row is hovered so it doesn't compete with the question text at rest; a pinned
+   question stays visible so its state reads at a glance. */
+.pin-button {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.user-row:hover .pin-button {
+  opacity: 1;
+}
+
+.pin-button:hover {
+  background: var(--gridline);
+  color: var(--text-primary);
+}
+
+.pin-button.is-pinned {
+  opacity: 1;
+  color: var(--series-1);
+}
+
+.user-bubble {
+  max-width: 78%;
+  background: var(--gridline);
+  color: var(--text-primary);
+  padding: 10px 16px;
+  border-radius: 18px 18px 4px 18px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Response: a separate, distinctly-bordered card below-left of the prompt bubble, so
+   the two are unambiguous at a glance rather than merged into one block. */
+.response-card {
+  max-width: 92%;
   background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 16px 18px;
-}
-
-.message-question {
-  font-weight: 600;
-  margin: 0 0 10px;
 }
 
 .status-line {
@@ -108,6 +235,10 @@ body {
 .narrative-text {
   line-height: 1.5;
   margin: 8px 0;
+  /* The confirm-then-answer response prepends "\n"-joined confirmation bullets
+     ("- Metric: ...") before the narrative - without this, they'd collapse onto one
+     line since plain text collapses newlines by default. */
+  white-space: pre-wrap;
 }
 
 .narrative-text strong {
@@ -120,35 +251,101 @@ body {
 }
 
 .query-form {
-  display: flex;
-  gap: 8px;
   position: sticky;
   bottom: 20px;
+  background: var(--page-plane);
+  padding-top: 10px;
 }
 
-.query-input {
-  flex: 1;
-  padding: 12px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
+/* The whole pill - border/shadow/focus ring live here, not on the textarea itself, so
+   the textarea and send button read as one unified control. */
+.query-input-wrap {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
   background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 8px 8px 8px 18px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.query-input-wrap:focus-within {
+  border-color: var(--series-1);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.1);
+}
+
+.query-textarea {
+  flex: 1;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
   color: var(--text-primary);
+  font-family: inherit;
   font-size: 14px;
+  line-height: 1.5;
+  padding: 7px 0;
+  /* Grows with content up to this height (see ChatStream.tsx's resize effect), then
+     scrolls internally instead of pushing the page layout around. */
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.query-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.query-textarea:disabled {
+  opacity: 0.6;
 }
 
 .query-submit {
-  padding: 12px 20px;
-  border-radius: 8px;
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
   border: none;
   background: var(--series-1);
-  color: white;
-  font-weight: 600;
+  color: #ffffff;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    filter 0.15s ease,
+    transform 0.1s ease;
+}
+
+.query-submit:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.query-submit:active:not(:disabled) {
+  transform: scale(0.94);
 }
 
 .query-submit:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
+}
+
+.query-submit-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #ffffff;
+  animation: query-submit-spin 0.7s linear infinite;
+}
+
+@keyframes query-submit-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .audit-drawer {
@@ -183,4 +380,154 @@ body {
   margin-top: 8px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* Pinned-questions rail: fixed to the left, in the space the centered .app-shell
+   never uses on a wide viewport. Positioned relative to .app-shell's own edge (a
+   calc() off the 50% center line, using its max-width: 860px / 2 = 430px, plus its
+   20px side padding, plus a fixed 28px gap), NOT a raw viewport-edge offset - a fixed
+   `left: 20px` drifts further and further from the chat column as the viewport grows,
+   which is exactly what read as "disconnected". This way the gap to the chat column
+   stays constant at every width the rail is shown at. `top` is a fixed estimate of
+   where the header ends and the conversation starts (title + two-line subtitle) - a
+   fixed-position element can't participate in flow to align itself automatically, and
+   the header's height is effectively static at the widths this rail appears. Only
+   shown once there's comfortably enough width not to crowd the chat column (see the
+   breakpoint below) - a narrower window hides it entirely rather than cramping either
+   side, which also covers "collapse it on mobile/tablet". */
+.pinned-sidebar {
+  display: none;
+  position: fixed;
+  top: 160px;
+  left: calc(50% - 658px);
+  width: 220px;
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+}
+
+@media (min-width: 1440px) {
+  .pinned-sidebar {
+    display: block;
+  }
+}
+
+.pinned-sidebar-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 10px;
+}
+
+.pinned-empty {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.pinned-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+}
+
+.pinned-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.pinned-item:hover {
+  background: var(--gridline);
+}
+
+.pinned-item-text {
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pinned-item-unpin {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  display: flex;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    color 0.15s ease;
+}
+
+.pinned-item:hover .pinned-item-unpin {
+  opacity: 1;
+}
+
+.pinned-item-unpin:hover {
+  color: var(--status-critical);
+}
+
+/* Table view for a multi-dimension result (see ChartRenderer.tsx / visualization.py) -
+   scrolls horizontally within its own box rather than the page, matching the pattern
+   already used for .audit-sql. */
+.viz-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.viz-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.viz-table th,
+.viz-table td {
+  padding: 8px 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.viz-table th {
+  background: var(--page-plane);
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: capitalize;
+  border-bottom: 1px solid var(--border);
+}
+
+.viz-table td {
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+}
+
+.viz-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.viz-table tbody tr:hover td {
+  background: var(--gridline);
 }
