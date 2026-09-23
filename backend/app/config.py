@@ -52,6 +52,30 @@ class Settings(BaseSettings):
 
     refresh_interval_minutes: int = 60
 
+    # --- Conversation / session persistence ------------------------------------
+    session_backend: str = "memory"  # "memory" | "redis"
+    redis_url: str | None = None  # e.g. redis://retail_copilot_redis:6379/0
+
+    # --- Optional LLM fallback for understanding unusual phrasings ------------
+    # Never used for SQL or numbers - see app/agent/nlu_fallback.py. "none" keeps the
+    # app 100% deterministic and free. "openai_compatible" works with Ollama (local,
+    # free) or the free tiers of Groq / Gemini / OpenRouter.
+    nlu_fallback: str = "none"  # "none" | "openai_compatible"
+    nlu_base_url: str = "http://host.docker.internal:11434/v1"
+    nlu_model: str = "qwen2.5:3b"
+    nlu_timeout_seconds: float = 20.0
+
+    # --- API behaviour --------------------------------------------------------
+    max_question_length: int = 1000
+    # Pacing between narrative chunks so the answer "types" out like other chat UIs.
+    # The text itself is computed before streaming starts; 0 disables pacing.
+    narrative_stream_delay_ms: int = 18
+    log_level: str = "INFO"
+
+    @property
+    def nlu_api_key(self) -> str | None:
+        return _resolve_secret("NLU_API_KEY")
+
     @property
     def agent_db_password(self) -> str:
         pw = _resolve_secret("POSTGRES_AGENT_PASSWORD")

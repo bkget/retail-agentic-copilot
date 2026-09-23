@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry.trace import Status, StatusCode
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
+from app.agent import scope
 from app.agent.llm_provider import LLMProvider, MockLLMProvider
+from app.agent.nlu_fallback import create_rewriter
 from app.agent.orchestrator import Orchestrator, OrchestratorError
 from app.config import get_settings
 from app.db.pool import create_agent_pool, create_refresher_pool
@@ -17,26 +21,38 @@ from app.observability.tracing import configure_tracing, current_trace_id, get_t
 from app.ratelimit import TokenBucketRateLimiter
 from app.refresh.scheduler import RefreshScheduler
 from app.schema.catalog import load_catalog
-from app.session.store import SessionStore
+from app.session.store import create_session_store
 from app.sse.events import (
     SCHEMA_VERSION,
     done_event,
     error_event,
+    heartbeat_comment,
     metadata_event,
     narrative_delta_event,
     sql_event,
     status_event,
+    step_event,
+    suggestions_event,
     visualization_event,
 )
+
+logger = logging.getLogger("copilot")
+
+HEARTBEAT_INTERVAL_SECONDS = 8
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
 
 
 def _build_llm_provider(provider_name: str) -> LLMProvider:
     if provider_name == "mock":
         return MockLLMProvider()
     if provider_name == "gemini":
-        # Deferred import: the gemini extra (google-adk) is optional and only needed
-        # when actually selected, so `mock` mode has no hard dependency on it.
-        from app.agent.gemini_provider import GeminiADKProvider
+        # Deferred import: google-adk is optional and only needed when selected.
+        try:
+            from app.agent.gemini_provider import GeminiADKProvider
+        except ImportError as exc:  # pragma: no cover - deployment misconfiguration
+            raise RuntimeError(
+                "LLM_PROVIDER=gemini needs the 'gemini' extra: rebuild with BACKEND_EXTRAS=redis,gemini"
+            ) from exc
 
         return GeminiADKProvider()
     raise ValueError(f"Unknown LLM_PROVIDER '{provider_name}'")
@@ -44,20 +60,24 @@ def _build_llm_provider(provider_name: str) -> LLMProvider:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    configure_tracing()
     settings = get_settings()
+    logging.basicConfig(
+        level=settings.log_level.upper(),
+        format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
+    )
+    configure_tracing()
     app.state.settings = settings
     app.state.agent_pool = await create_agent_pool(settings)
     app.state.catalog = await load_catalog(app.state.agent_pool)
     app.state.llm_provider = _build_llm_provider(settings.llm_provider)
-    app.state.session_store = SessionStore(settings.session_ttl_seconds, settings.session_max_turns)
+    app.state.session_store = create_session_store(settings)
+    app.state.rewriter = create_rewriter(settings)
     app.state.orchestrator = Orchestrator(
-        app.state.llm_provider, app.state.agent_pool, app.state.session_store
+        app.state.llm_provider, app.state.agent_pool, app.state.session_store, app.state.rewriter
     )
     app.state.rate_limiter = TokenBucketRateLimiter(
         settings.rate_limit_capacity, settings.rate_limit_refill_per_minute
     )
-
     app.state.refresher_pool = await create_refresher_pool(settings)
 
     async def _reload_catalog() -> None:
@@ -67,191 +87,268 @@ async def lifespan(app: FastAPI):
         app.state.refresher_pool, settings.refresh_interval_minutes, on_refreshed=_reload_catalog
     )
     app.state.refresh_scheduler.start()
+    logger.info(
+        "started provider=%s nlu_fallback=%s session_backend=%s",
+        settings.llm_provider, settings.nlu_fallback, settings.session_backend,
+    )
 
     yield
 
     app.state.refresh_scheduler.shutdown()
+    if app.state.rewriter is not None:
+        await app.state.rewriter.close()
+    await app.state.session_store.close()
     await app.state.refresher_pool.close()
     await app.state.agent_pool.close()
 
 
-HEARTBEAT_INTERVAL_SECONDS = 8
-
-app = FastAPI(title="Enterprise Agentic Data Copilot", lifespan=lifespan)
+app = FastAPI(title="Retail Agentic Copilot", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_allow_origins,
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type"],
 )
+
+
+@app.get("/livez")
+async def livez():
+    return {"status": "ok"}
 
 
 @app.get("/healthz")
 async def healthz(request: Request):
-    pool = request.app.state.agent_pool
-    async with pool.acquire() as conn:
-        await conn.fetchval("SELECT 1")
+    """Readiness: the process is up AND the database answers."""
+    try:
+        async with request.app.state.agent_pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
     return {"status": "ok"}
 
 
-class QueryRequest(BaseModel):
-    question: str
-    session_id: str = "anonymous"
+@app.get("/api/capabilities")
+async def capabilities(request: Request):
+    """What the UI shows on an empty chat: the data range and example questions."""
+    catalog = request.app.state.catalog
+    settings = request.app.state.settings
+    return {
+        "year_min": catalog.year_min,
+        "year_max": catalog.year_max,
+        "examples": scope.example_questions(catalog.year_max),
+        "llm_provider": settings.llm_provider,
+        "nlu_fallback": settings.nlu_fallback,
+    }
+
+
+def _validate_session_id(session_id: str) -> str | None:
+    return session_id if SESSION_ID_RE.match(session_id) else None
 
 
 @app.get("/api/session/{session_id}/history")
 async def session_history(session_id: str, request: Request):
-    """Lets the frontend rehydrate a returning session's chat log on page load - the
-    SessionStore already keeps this server-side (see app/session/store.py) for
-    resolving follow-ups, but nothing previously exposed it for the UI to render.
-    Only question/sql/row_count/narrative are persisted per turn (no chart config or
-    per-request timing metrics), so a rehydrated turn shows its text but not its
-    chart - a disclosed, minor fidelity gap, not a bug."""
-    app_state = request.app.state
-    session = app_state.session_store.get_session(session_id)
+    """Rehydrates a returning session's chat (e.g. after a page reload)."""
+    if not _validate_session_id(session_id):
+        return JSONResponse(status_code=400, content={"error": "Invalid session id."})
+    session = await request.app.state.session_store.get_session(session_id)
     return {
         "turns": [
             {
-                "question": turn.question,
-                "sql": turn.sql,
-                "row_count": turn.row_count,
-                "narrative": turn.narrative_text,
+                "question": t.question,
+                "sql": t.sql,
+                "row_count": t.row_count,
+                "narrative": t.narrative_text,
+                "response_type": t.response_type or ("query" if t.sql else "conversational"),
+                "visualization": t.visualization,
+                "suggestions": list(t.suggestions),
             }
-            for turn in session.history
+            for t in session.history
         ]
     }
+
+
+@app.delete("/api/session/{session_id}")
+async def clear_session(session_id: str, request: Request):
+    if not _validate_session_id(session_id):
+        return JSONResponse(status_code=400, content={"error": "Invalid session id."})
+    await request.app.state.session_store.clear_session(session_id)
+    return {"status": "cleared"}
+
+
+class QueryRequest(BaseModel):
+    question: str = Field(min_length=1)
+    session_id: str = "anonymous"
+
+    @field_validator("question")
+    @classmethod
+    def _question_ok(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("question must not be empty")
+        if len(v) > get_settings().max_question_length:
+            raise ValueError(f"question must be at most {get_settings().max_question_length} characters")
+        return v
+
+    @field_validator("session_id")
+    @classmethod
+    def _session_ok(cls, v: str) -> str:
+        if not SESSION_ID_RE.match(v):
+            raise ValueError("invalid session_id")
+        return v
+
+
+def _client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _narrative_chunks(text: str, words_per_chunk: int = 3) -> list[str]:
+    tokens = re.findall(r"\S+\s*", text)
+    return ["".join(tokens[i : i + words_per_chunk]) for i in range(0, len(tokens), words_per_chunk)]
 
 
 @app.post("/api/query")
 async def query(payload: QueryRequest, request: Request):
     app_state = request.app.state
-    settings: object = app_state.settings
+    settings = app_state.settings
 
-    if not app_state.rate_limiter.allow(payload.session_id):
+    if not app_state.rate_limiter.allow(_client_key(request)):
         return JSONResponse(
             status_code=429,
-            content={"error": "Rate limit exceeded. Please wait before asking another question."},
+            content={"error": "You're sending questions quickly - please wait a few seconds and try again."},
         )
 
     async def stream():
         tracer = get_tracer()
         with tracer.start_as_current_span("api.query") as root_span:
             root_span.set_attribute("copilot.session_id", payload.session_id)
-            root_span.set_attribute("copilot.question", payload.question)
             trace_id = current_trace_id() or "unknown"
 
-            yield status_event("parsing_intent")
+            yield status_event("thinking")
 
             catalog = app_state.catalog
             if catalog.is_stale():
                 catalog = await load_catalog(app_state.agent_pool)
                 app_state.catalog = catalog
 
-            # classify_input, get_session, map_terms_to_columns, generate_sql, run_sql
-            # and update_session all happen inside orchestrator.answer() itself - a
-            # single call now covers "is this even a query?" through execution and
-            # session persistence, so there's no natural point between classify and
-            # generate to narrate separately; "thinking" covers both.
-            yield status_event("thinking")
-            answer_task = asyncio.ensure_future(
+            steps: asyncio.Queue[dict] = asyncio.Queue()
+
+            async def on_step(step: dict) -> None:
+                await steps.put(step)
+
+            task = asyncio.create_task(
                 app_state.orchestrator.answer(
                     payload.question,
                     catalog,
                     payload.session_id,
                     max_retries=settings.max_generation_retries,
+                    on_step=on_step,
                 )
             )
             try:
-                # A real LLM provider can make several sequential model calls per turn
-                # (classify, map terms, generate SQL - observed 15-40+ seconds total)
-                # with nothing otherwise sent on the wire in that window. A long silent
-                # gap on a held-open connection reads as dead to browsers, proxies, and
-                # Docker's own port-forwarding layer - this produced a hard "network
-                # error" on the client that had nothing to do with the model being
-                # slow, only with the connection looking abandoned. A bare SSE comment
-                # line is valid per the spec and silently ignored by any conformant
-                # parser (this app's own sseClient.ts requires both an `event:` and a
-                # `data:` line to treat something as a frame, so a comment-only line
-                # never reaches the UI), so it keeps the connection alive with zero
-                # visible effect.
-                while not answer_task.done():
-                    _, pending = await asyncio.wait({answer_task}, timeout=HEARTBEAT_INTERVAL_SECONDS)
-                    if pending:
-                        yield ": heartbeat\n\n"
-                result = answer_task.result()
-            except OrchestratorError as exc:
-                yield error_event(str(exc))
-                return
-            except Exception as exc:
-                # Anything the LLM provider itself raises directly - a real API call
-                # can fail with a quota/rate-limit error, a transient network error, a
-                # safety-filter block, etc. - isn't wrapped in OrchestratorError (that's
-                # reserved for "generation ran, but produced no valid/executable SQL
-                # after retries"). Without this, such an error propagated as an
-                # unhandled exception mid-stream, abruptly closing the connection with
-                # no clean error frame - a bare, uninformative "network error" on the
-                # client for what was actually a clean, nameable failure the whole
-                # time. Logged with the trace_id (not re-raised) so it's diagnosable
-                # server-side without leaking provider-specific error text to the
-                # client.
-                root_span.record_exception(exc)
-                root_span.set_status(Status(StatusCode.ERROR, "unhandled LLM provider error"))
-                yield error_event(
-                    "The AI provider is temporarily unavailable or over its usage "
-                    "limit. Please try again in a moment."
-                )
-                return
-
-            is_query = result.response_type == "query"
-
-            if is_query:
-                yield sql_event(result.sql_executed, result.is_truncated)
-
-            yield status_event("summarizing")
-            words = result.narrative_text.split(" ")
-            for i in range(0, len(words), 4):
-                chunk = " ".join(words[i : i + 4])
-                yield narrative_delta_event(chunk + (" " if i + 4 < len(words) else ""))
-
-            if is_query and result.visualization is not None:
-                yield visualization_event(result.visualization.to_dict())
-
-            last_refreshed_at = None
-            if is_query:
-                # Only meaningful when data was actually queried - skip the round-trip
-                # entirely for conversational/clarification turns.
-                async with app_state.agent_pool.acquire() as conn:
-                    refresh_rows = await conn.fetch(
-                        "SELECT view_name, refreshed_at FROM public.refresh_log"
+                # Relay reasoning steps live while the turn runs. A heartbeat comment
+                # keeps browsers/proxies from treating a slow LLM call as a dead stream.
+                getter: asyncio.Future | None = None
+                while True:
+                    if getter is None:
+                        getter = asyncio.ensure_future(steps.get())
+                    done, _ = await asyncio.wait(
+                        {getter, task}, timeout=HEARTBEAT_INTERVAL_SECONDS,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-                last_refreshed_at = max((r["refreshed_at"] for r in refresh_rows), default=None)
+                    if getter in done:
+                        yield step_event(getter.result())
+                        getter = None
+                        continue
+                    if task in done:
+                        getter.cancel()
+                        while not steps.empty():
+                            yield step_event(steps.get_nowait())
+                        break
+                    yield heartbeat_comment()
 
-            metadata = {
-                **result.metrics,
-                "row_count": result.row_count,
-                "is_truncated": result.is_truncated,
-                "trace_id": trace_id,
-                "last_refreshed_at": last_refreshed_at.isoformat() if last_refreshed_at else None,
-                "response_type": result.response_type,
-            }
-            yield metadata_event(metadata)
+                try:
+                    result = task.result()
+                except OrchestratorError as exc:
+                    root_span.record_exception(exc)
+                    yield error_event(
+                        "I couldn't build a valid query for that question. Could you rephrase it - "
+                        "for example, 'total revenue by division in 2020'?"
+                    )
+                    return
+                except Exception as exc:
+                    # Provider failures (quota, network, safety filter) - logged with the
+                    # trace id, never leaked verbatim to the client.
+                    root_span.record_exception(exc)
+                    root_span.set_status(Status(StatusCode.ERROR, "unhandled provider error"))
+                    logger.exception("query failed trace_id=%s", trace_id)
+                    yield error_event(
+                        "The AI provider is temporarily unavailable or over its usage limit. "
+                        "Please try again in a moment."
+                    )
+                    return
 
-            consolidated = {
-                "schema_version": SCHEMA_VERSION,
-                "trace_id": trace_id,
-                "status": "success",
-                "response_type": result.response_type,
-                "metrics": result.metrics,
-                "last_refreshed_at": last_refreshed_at.isoformat() if last_refreshed_at else None,
-                "data_summary": {
-                    "row_count": result.row_count,
-                    "is_truncated": result.is_truncated,
-                    "formatting": result.formatting,
-                },
-                "narrative": result.narrative_text,
-                "visualization": result.visualization.to_dict() if result.visualization else None,
-            }
-            yield done_event(consolidated)
+                is_query = result.response_type == "query"
+                if is_query:
+                    yield sql_event(result.sql_executed, result.is_truncated)
 
-    return StreamingResponse(stream(), media_type="text/event-stream")
+                yield status_event("summarizing")
+                delay = settings.narrative_stream_delay_ms / 1000
+                for chunk in _narrative_chunks(result.narrative_text):
+                    yield narrative_delta_event(chunk)
+                    if delay:
+                        await asyncio.sleep(delay)
+
+                if is_query and result.visualization is not None:
+                    yield visualization_event(result.visualization.to_dict())
+
+                if result.suggestions:
+                    yield suggestions_event(result.suggestions, result.response_type)
+
+                last_refreshed_at = None
+                if is_query:
+                    async with app_state.agent_pool.acquire() as conn:
+                        refresh_rows = await conn.fetch("SELECT refreshed_at FROM public.refresh_log")
+                    last_refreshed_at = max((r["refreshed_at"] for r in refresh_rows), default=None)
+                refreshed_iso = last_refreshed_at.isoformat() if last_refreshed_at else None
+
+                yield metadata_event(
+                    {
+                        **result.metrics,
+                        "row_count": result.row_count,
+                        "is_truncated": result.is_truncated,
+                        "trace_id": trace_id,
+                        "last_refreshed_at": refreshed_iso,
+                        "response_type": result.response_type,
+                        "interpreted_as": result.interpreted_as,
+                    }
+                )
+                yield done_event(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "trace_id": trace_id,
+                        "status": "success",
+                        "response_type": result.response_type,
+                        "metrics": result.metrics,
+                        "last_refreshed_at": refreshed_iso,
+                        "data_summary": {
+                            "row_count": result.row_count,
+                            "is_truncated": result.is_truncated,
+                            "formatting": result.formatting,
+                        },
+                        "narrative": result.narrative_text,
+                        "visualization": result.visualization.to_dict() if result.visualization else None,
+                        "suggestions": result.suggestions,
+                        "interpreted_as": result.interpreted_as,
+                    }
+                )
+            finally:
+                # Client disconnected / pressed Stop: don't keep burning LLM or DB time.
+                if not task.done():
+                    task.cancel()
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

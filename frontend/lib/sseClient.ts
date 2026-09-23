@@ -1,9 +1,8 @@
-import type { SseFrame } from "./types";
+import type { Capabilities, HistoryTurn, SseFrame } from "./types";
 
-// Browser EventSource can't send a POST body, and this endpoint needs one (the
-// question + session_id), so we read the stream manually via fetch + ReadableStream
-// instead. Frames are `event: <name>\ndata: <json>\n\n` - split on the blank-line
-// separator, parse each line pair.
+// Browser EventSource can't POST a body, so the stream is read manually via fetch +
+// ReadableStream. Frames are `event: <name>\ndata: <json>\n\n`; comment lines
+// (": heartbeat") carry no event and are skipped by parseFrame.
 export async function* streamQuery(
   apiUrl: string,
   question: string,
@@ -22,7 +21,10 @@ export async function* streamQuery(
     yield { event: "error", data: { message: body.error ?? "Rate limit exceeded." } };
     return;
   }
-
+  if (response.status === 422) {
+    yield { event: "error", data: { message: "That message couldn't be processed - it may be empty or too long." } };
+    return;
+  }
   if (!response.ok || !response.body) {
     yield { event: "error", data: { message: `Request failed (${response.status}).` } };
     return;
@@ -56,8 +58,35 @@ function parseFrame(raw: string): SseFrame | null {
   }
   if (!eventName || dataLine === null) return null;
   try {
-    const data = JSON.parse(dataLine);
-    return { event: eventName, data } as SseFrame;
+    return { event: eventName, data: JSON.parse(dataLine) } as SseFrame;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchHistory(apiUrl: string, sessionId: string): Promise<HistoryTurn[]> {
+  try {
+    const res = await fetch(`${apiUrl}/api/session/${encodeURIComponent(sessionId)}/history`);
+    if (!res.ok) return [];
+    const body = await res.json();
+    return Array.isArray(body.turns) ? body.turns : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function clearSession(apiUrl: string, sessionId: string): Promise<void> {
+  try {
+    await fetch(`${apiUrl}/api/session/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+  } catch {
+    /* best effort - a fresh session id is used either way */
+  }
+}
+
+export async function fetchCapabilities(apiUrl: string): Promise<Capabilities | null> {
+  try {
+    const res = await fetch(`${apiUrl}/api/capabilities`);
+    return res.ok ? await res.json() : null;
   } catch {
     return null;
   }

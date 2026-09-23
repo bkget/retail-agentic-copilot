@@ -24,6 +24,7 @@ Ask questions in plain English; a Google ADK / Gemini Flash agent transforms int
 - [Architecture & Data Flow](#architecture--data-flow)
 - [Quickstart with Docker](#quickstart-with-docker)
 - [Database Connection & Schema Reference](#database-connection--schema-reference)
+- [Conversation Design (v0.2)](#-conversation-design-v02)
 - [Security Model & AST Guardrails](#security-model--ast-guardrails)
 - [Testing & Evaluation Harness](#testing--evaluation-harness)
 - [Project Structure](#project-structure)
@@ -65,129 +66,13 @@ When the stack is running via `docker compose up -d`:
 
 ### 1. Request Processing & Guardrail Pipeline
 
-```mermaid
-flowchart TD
-    subgraph ClientLayer["🖥️ Frontend Client (Next.js 14)"]
-        UI["React Chat Interface<br/>(Recharts Visualization)"]
-        SSEClient["SSE Stream Listener<br/>(EventSource Client)"]
-    end
-
-    subgraph BackendAPI["⚡ Backend Service (FastAPI & Python 3.11)"]
-        Router["/api/query (SSE Endpoint)"]
-        SessionStore["In-Memory Session Store<br/>(Multi-Turn Context)"]
-        IntentClassifier{"Intent Classifier"}
-        DirectResponse["Direct Answer / Clarification"]
-        
-        subgraph AgentCore["🤖 Agent Orchestrator"]
-            LLMRouter["LLM Provider Router<br/>(MockLLMProvider / Gemini Flash)"]
-            SQLGen["SQL Query Generator"]
-        end
-        
-        subgraph Guardrail["🛡️ AST Guardrail (sqlglot)"]
-            ASTParse["Parse AST & Extract Nodes"]
-            TableCheck{"Table & Schema<br/>Allowlist Check"}
-            FuncCheck{"Function Allowlist<br/>Check"}
-            DMLCheck{"DML / CTE / DDL<br/>Walk Inspection"}
-            LimitInject["Inject Row LIMIT (<= 500)"]
-            Reserialize["Re-serialize AST to SQL"]
-        end
-
-        subgraph Engine["⚙️ Execution & Synthesizer"]
-            AsyncpgClient["Asyncpg Connection Pool"]
-            NarrativeSynth["Deterministic Python<br/>Narrative Synthesizer"]
-            ChartConfig["Chart JSON Formatter"]
-        end
-    end
-
-    subgraph DBLayer["🗄️ Database (PostgreSQL 17)"]
-        AgentRO[("agent_ro Role<br/>(Read-Only, 8s Timeout)")]
-        SemanticViews[("Semantic Layer Views<br/>mv_sales_daily_rollup<br/>mv_sales_analysis")]
-    end
-
-    UI -->|"1. Natural Language Query"| Router
-    Router <--> SessionStore
-    Router --> IntentClassifier
-    IntentClassifier -->|"Conversational / Greeting"| DirectResponse -->|"Stream SSE"| SSEClient
-    IntentClassifier -->|"Analytical Request"| LLMRouter
-    LLMRouter --> SQLGen
-    SQLGen -->|"Raw Generated SQL"| ASTParse
-    ASTParse --> TableCheck
-    TableCheck --> FuncCheck
-    FuncCheck --> DMLCheck
-    DMLCheck --> LimitInject
-    LimitInject --> Reserialize
-    
-    Reserialize -->|"Safe Re-serialized SQL"| AsyncpgClient
-    AsyncpgClient -->|"Execute Query"| AgentRO
-    AgentRO --> SemanticViews
-    SemanticViews -->|"Raw Result Rows"| AsyncpgClient
-    
-    AsyncpgClient --> NarrativeSynth
-    NarrativeSynth --> ChartConfig
-    ChartConfig -->|"Live SSE Events (Status, SQL, Narrative, Chart)"| SSEClient
-    SSEClient --> UI
-
-    classDef client fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0369a1;
-    classDef backend fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#15803d;
-    classDef security fill:#fef2f2,stroke:#dc2626,stroke-width:2px,color:#b91c1c;
-    classDef db fill:#fefce8,stroke:#ca8a04,stroke-width:2px,color:#a16207;
-
-    class UI,SSEClient client;
-    class Router,SessionStore,IntentClassifier,DirectResponse,LLMRouter,SQLGen,AsyncpgClient,NarrativeSynth,ChartConfig backend;
-    class ASTParse,TableCheck,FuncCheck,DMLCheck,LimitInject,Reserialize security;
-    class AgentRO,SemanticViews db;
-```
+<img src="./architecture.png" alt="Request processing and AST guardrail pipeline - from browser query through intent classification, SQL generation, the AST guardrail, PostgreSQL execution, and back as narrative + chart SSE events" width="100%">
 
 ---
 
 ### 2. Database Schema Architecture & Semantic Lineage
 
-```mermaid
-flowchart TD
-    subgraph RawData["📦 Seed Data (1,000,000 Records)"]
-        CSV["db/seed/*.csv.gz"]
-    end
-
-    subgraph CoreSchema["🔒 Core 3NF Normalized Schema (core.*)"]
-        FactTable["core.fact_table<br/>(1M fact records, unit/total price numeric)"]
-        DimItem["core.item_dim<br/>(item_name, supplier, man_country)"]
-        DimStore["core.store_dim<br/>(division, district, upazila)"]
-        DimPayment["core.payment_dim<br/>(trans_type, bank_name)"]
-        DimTime["core.time_dim<br/>(date, year, quarter, month, day)"]
-        DimCustomer["core.customer_dim<br/>⚠️ PII ISOLATED & EXCLUDED"]
-    end
-
-    subgraph SecurityBoundary["🛡️ Security & Role Isolation"]
-        RefresherRole["refresher_rw Role<br/>(Owner of Materialized Views)"]
-        AgentRole["agent_ro Role<br/>(SELECT on public.* views only)"]
-    end
-
-    subgraph SemanticLayer["📊 2-Tier Semantic Layer (public.*)"]
-        Tier2["public.mv_sales_analysis<br/>• Tier 2: Row-level OBT for deep drilldowns<br/>• Surrogate fact_key, strict PII removal<br/>• Indexed by date, location, item"]
-        Tier1["public.mv_sales_daily_rollup<br/>• Tier 1: Pre-aggregated daily rollup<br/>• Grouped by date, year, month, division, district, item<br/>• SUM(total_revenue), SUM(total_units_sold), COUNT(*)"]
-    end
-
-    CSV -->|"gunzip + \copy on init"| FactTable & DimItem & DimStore & DimPayment & DimTime & DimCustomer
-
-    FactTable & DimItem & DimStore & DimPayment & DimTime -->|"Inner Join & PII Sanitization"| Tier2
-    Tier2 -->|"Daily Aggregation Rollup"| Tier1
-
-    RefresherRole -->|"APScheduler REFRESH CONCURRENTLY"| Tier2
-    RefresherRole -->|"APScheduler REFRESH CONCURRENTLY"| Tier1
-
-    AgentRole -->|"Read-Only Queries"| Tier1
-    AgentRole -->|"Read-Only Queries"| Tier2
-
-    classDef raw fill:#f3f4f6,stroke:#4b5563,stroke-width:1px,color:#1f2937;
-    classDef core fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#991b1b;
-    classDef semantic fill:#dcfce7,stroke:#22c55e,stroke-width:2px,color:#166534;
-    classDef roles fill:#fef3c7,stroke:#f59e0b,stroke-width:2px,color:#92400e;
-
-    class CSV raw;
-    class FactTable,DimItem,DimStore,DimPayment,DimTime,DimCustomer core;
-    class Tier1,Tier2 semantic;
-    class RefresherRole,AgentRole roles;
-```
+<img src="./database_schema_architecture.png" alt="Database schema architecture - normalized core.* 3NF schema, role isolation (agent_ro / refresher_rw), and the two-tier public.* semantic layer (mv_sales_analysis, mv_sales_daily_rollup)" width="100%">
 
 ---
 
@@ -204,39 +89,7 @@ The project includes an intelligent, colorized **Makefile** that automates conta
 make setup && make up
 ```
 
-Type `make` or `make help` to inspect all available targets:
-
-```
-Retail Agentic Copilot — Automation CLI
-
-Usage: make <target>
-
-  help                 Display this interactive help menu
-  setup                Initialize environment, secrets, and install backend dependencies
-  init-env             Create .env from .env.example if not already present
-  init-secrets         Ensure Docker secret files exist from .example templates
-  install              Install backend dependencies locally
-  up                   Build and launch full container stack (DB + Backend + Frontend)
-  down                 Stop and remove all containers and network bridges
-  restart              Restart the full container stack
-  ps                   List running containers and health statuses
-  logs                 Tail streaming logs from all services
-  logs-backend         Tail streaming logs from FastAPI backend
-  logs-db              Tail streaming logs from PostgreSQL database
-  logs-frontend        Tail streaming logs from Next.js frontend
-  db-shell-agent       Open psql shell as agent_ro role (read-only semantic layer)
-  db-shell-admin       Open psql shell as postgres superuser
-  db-reset             Hard reset database volume and re-seed 1M records (Caution: wipes data)
-  test                 Run unit and integration tests with pytest
-  test-slow            Run slow integration tests (including materialized view refresh)
-  eval                 Run Execution Accuracy (EX) benchmark with default mock router
-  eval-gemini          Run Execution Accuracy (EX) benchmark with Gemini provider
-  api-health           Verify backend health check via HTTP request
-  clean                Remove temporary python bytecode and test cache artifacts
-  clean-all            Complete teardown: remove containers, volumes, networks, and caches
-
-Quick Start: make setup && make up
-```
+Type `make` or `make help` to inspect all available targets.
 
 ---
 
@@ -361,6 +214,63 @@ ORDER BY avg_order_value DESC;
 
 ---
 
+## 💬 Conversation Design (v0.2)
+
+### Multi-turn slot filling - no more clarification loops
+When the assistant asks a follow-up question it stores a **pending clarification** (the
+partially-understood question) in session state. The next message is interpreted as the
+*answer* first - `2020`, `all time`, `by month`, `Revenue`, `yes` - and merged with the
+original question. A clarification is never asked twice in a row: if the reply still
+leaves a gap, a sensible default is used and stated in the answer.
+
+| You say | Assistant |
+|---|---|
+| `revenue` | *Follow-up:* how should I break it down? [By division] [By month in 2021] [All-time total] |
+| `2020` | Total revenue in 2020 = ... |
+| `Compare revenue per store and monthly distribution` | Revenue by district x month (top 8), multi-line chart, note that stores are grouped by district |
+| `2020` -> `go with all time` | Same breakdown, re-scoped each time (context carried over) |
+| `What is the profit by division?` | No cost data - *offers* "Total revenue by division" [Yes, show that] [No thanks] |
+| `Total revenue in 2024` | Data covers 2014-2021 - offers 2021 instead |
+| `Compare 2019 and 2020` (after a breakdown) | One row per entity with **2019 \| 2020 \| Change %**; grouped bars (<=12 entities) or a comparison table; narrative states each year's figure and the biggest movers |
+| `can you delete all records for DHAKA?` | Refuses (read-only access, every query verified as SELECT) and offers a read-only view instead |
+| `monthly revenue in 2019 for the maximum revenue store` | Finds the single top district first, then its 12 months - both steps visible in the trace |
+| `compare monthly revenue per store in 2015 and 2016 using line chart` | Top 4 districts x 2 years as 8 lines (colour = district, dashed = earlier year); explicit chart requests honoured when they suit the data |
+| `who won the world cup?` | Can't answer; explains what it *can* answer + example chips |
+
+### Live reasoning trace ("thinking")
+Every pipeline stage streams a `step` SSE event (`running` -> `done`/`warning`/`error`):
+understanding the question -> using conversation context -> planning -> writing SQL ->
+guardrail check -> running the query -> summarizing. The UI shows this as a collapsible
+**Thinking...** panel with a shimmer and timer, collapsing to *"Thought for 1.2s"* when
+the answer starts typing (with a streaming caret). Follow-up questions from the
+assistant are rendered as a distinct, right-indented card with quick-reply chips.
+
+### SSE event contract (schema 2.1)
+`status` · `step` · `sql` · `narrative_delta` · `visualization` · `suggestions` · `metadata` · `done` | `error`
+(`: heartbeat` comment lines keep long LLM calls alive through proxies).
+
+### Running without a paid LLM key
+The default (`LLM_PROVIDER=mock`, `NLU_FALLBACK=none`) is fully deterministic, free, and
+scores 100% on the golden set. To handle phrasings the rules don't know, enable the
+**NLU fallback** - an LLM that only *rewrites* the question into the known vocabulary
+(SQL and every number stay deterministic and AST-guardrailed):
+
+| Option | Cost | `.env` |
+|---|---|---|
+| **Ollama** (local) | free, no key | `NLU_FALLBACK=openai_compatible` `NLU_BASE_URL=http://host.docker.internal:11434/v1` `NLU_MODEL=qwen2.5:3b` (run `ollama pull qwen2.5:3b` first) |
+| Groq | free tier key | `NLU_BASE_URL=https://api.groq.com/openai/v1` `NLU_MODEL=llama-3.1-8b-instant` `NLU_API_KEY=...` |
+| Gemini | free tier key | `NLU_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai` `NLU_MODEL=gemini-flash-lite-latest` `NLU_API_KEY=...` |
+
+If the LLM is slow, over quota or down, the turn degrades to the deterministic reply - it never fails.
+
+### Production settings
+- `SESSION_BACKEND=redis` + `docker compose --profile redis up -d` for multi-replica session state (JSON-serialized, TTL in Redis).
+- Per-session turn serialization, client-disconnect cancellation, input validation (length, session-id format), per-IP rate limiting, LRU-bounded in-memory stores.
+- Non-root containers, dependencies installed from `pyproject.toml`, `/livez` (liveness) and `/healthz` (readiness, checks DB).
+- New endpoints: `GET /api/capabilities`, `GET /api/session/{id}/history` (reload keeps the chat), `DELETE /api/session/{id}` (New chat).
+
+---
+
 ## 🔒 Security Model & AST Guardrails
 
 1. **Role-Based Isolation**:
@@ -455,12 +365,8 @@ Building against real 1,000,000-row retail data uncovered multiple subtle bugs t
 
 ## ⚠️ Known Limitations
 
-- **Process-Local Session Memory**: In-memory multi-turn session store is optimized for single-container setups; production multi-replica scaling would leverage Redis.
+- **Rule-based understanding by default**: without the optional NLU fallback, phrasings outside the synonym tables get an honest "can't answer + here's what I can do" reply rather than a guess.
+- **Store granularity**: individual store IDs aren't in the semantic layer, so "per store" is answered per district (disclosed in the answer).
 - **Eval Dataset Scope**: Golden evaluation set currently includes 30 representative test cases; expanding to 100+ cases is ongoing.
 - **Frontend Dependencies**: Built on Next.js 14 for stability; upgrade paths to Next.js 16 will follow upstream LTS patches.
 
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

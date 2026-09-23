@@ -10,6 +10,10 @@
   --border: rgba(11, 11, 11, 0.1);
   --series-1: #2a78d6;
   --status-critical: #d03b3b;
+  --accent-soft: rgba(42, 120, 214, 0.07);
+  --accent-border: rgba(42, 120, 214, 0.45);
+  --status-warning: #b26b00;
+  --shimmer-hi: #0b0b0b;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -25,6 +29,10 @@
     --border: rgba(255, 255, 255, 0.1);
     --series-1: #3987e5;
     --status-critical: #e66767;
+    --accent-soft: rgba(57, 135, 229, 0.1);
+    --accent-border: rgba(57, 135, 229, 0.5);
+    --status-warning: #e0a040;
+    --shimmer-hi: #ffffff;
   }
 }
 
@@ -40,6 +48,10 @@
   --border: rgba(255, 255, 255, 0.1);
   --series-1: #3987e5;
   --status-critical: #e66767;
+  --accent-soft: rgba(57, 135, 229, 0.1);
+  --accent-border: rgba(57, 135, 229, 0.5);
+  --status-warning: #e0a040;
+  --shimmer-hi: #ffffff;
 }
 
 * {
@@ -233,12 +245,8 @@ body {
 }
 
 .narrative-text {
-  line-height: 1.5;
-  margin: 8px 0;
-  /* The confirm-then-answer response prepends "\n"-joined confirmation bullets
-     ("- Metric: ...") before the narrative - without this, they'd collapse onto one
-     line since plain text collapses newlines by default. */
-  white-space: pre-wrap;
+  line-height: 1.6;
+  margin: 4px 0;
 }
 
 .narrative-text strong {
@@ -530,4 +538,516 @@ body {
 
 .viz-table tbody tr:hover td {
   background: var(--gridline);
+}
+
+/* ==========================================================================
+   Assistant turn layout, clarifying questions, thinking trace, streaming
+   ========================================================================== */
+
+.assistant-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+/* A follow-up question from the assistant is visually distinct from an answer:
+   indented toward the user's side of the thread, tinted, with an accent rail - so
+   it reads as "your turn", not as a result. */
+.assistant-row.is-clarification {
+  padding-left: 56px;
+}
+
+.response-card.is-clarification {
+  max-width: 78%;
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  border-left-width: 3px;
+  border-radius: 12px 12px 12px 4px;
+}
+
+.clarify-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--series-1);
+  margin-bottom: 6px;
+}
+
+@media (max-width: 640px) {
+  .assistant-row.is-clarification {
+    padding-left: 20px;
+  }
+  .response-card.is-clarification {
+    max-width: 100%;
+  }
+}
+
+/* --- Thinking panel ------------------------------------------------------- */
+
+.thinking {
+  margin: -2px 0 8px;
+}
+
+.thinking-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 6px 4px 2px;
+  margin-left: -2px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.thinking-header:hover {
+  color: var(--text-secondary);
+  background: var(--gridline);
+}
+
+.thinking-header:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 1px;
+}
+
+.thinking-icon {
+  display: inline-flex;
+  width: 16px;
+  justify-content: center;
+  color: var(--series-1);
+}
+
+.thinking-title {
+  font-weight: 500;
+}
+
+/* Moving highlight across the label while the agent is working. */
+.thinking-title.shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--text-muted) 0%,
+    var(--text-muted) 40%,
+    var(--shimmer-hi) 50%,
+    var(--text-muted) 60%,
+    var(--text-muted) 100%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1.8s linear infinite;
+}
+
+@keyframes shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -150% 0; }
+}
+
+.thinking-timer {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.thinking-chevron {
+  transition: transform 0.15s ease;
+}
+
+.thinking-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-border);
+  border-top-color: var(--series-1);
+  animation: query-submit-spin 0.8s linear infinite;
+}
+
+.thinking-steps {
+  list-style: none;
+  margin: 4px 0 4px 7px;
+  padding: 2px 0 2px 14px;
+  border-left: 1px solid var(--gridline);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  animation: fade-in 0.2s ease;
+}
+
+.thinking-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  animation: fade-in 0.25s ease;
+}
+
+.thinking-step-marker {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--series-1);
+  background: var(--accent-soft);
+}
+
+.thinking-step.is-error .thinking-step-marker {
+  color: var(--status-critical);
+  background: transparent;
+  border: 1px solid var(--status-critical);
+}
+
+.thinking-step.is-warning .thinking-step-marker {
+  color: var(--status-warning);
+  background: transparent;
+}
+
+.thinking-step-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--series-1);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.thinking-step-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.thinking-step-label {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.thinking-step.is-running .thinking-step-label {
+  color: var(--text-secondary);
+}
+
+.thinking-step-detail {
+  color: var(--text-muted);
+  font-size: 12.5px;
+  word-break: break-word;
+}
+
+.thinking-step-time {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(0.7); opacity: 0.5; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* --- Typing indicator + streaming caret ---------------------------------- */
+
+.typing-dots {
+  display: inline-flex;
+  gap: 4px;
+  padding: 6px 2px;
+}
+
+.typing-dots span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+
+.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+.stream-caret {
+  display: inline-block;
+  width: 8px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  background: var(--series-1);
+  animation: caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes caret-blink {
+  to { visibility: hidden; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-title.shimmer,
+  .typing-dots span,
+  .stream-caret,
+  .thinking-step-pulse,
+  .thinking-spinner {
+    animation: none;
+  }
+  .thinking-title.shimmer {
+    color: var(--text-muted);
+  }
+}
+
+/* --- Markdown ------------------------------------------------------------ */
+
+.md p {
+  margin: 0 0 10px;
+}
+
+.md p:last-child,
+.md ul:last-child {
+  margin-bottom: 0;
+}
+
+.md ul {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.md li {
+  margin: 3px 0;
+}
+
+.md strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.stopped-text {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* --- Suggestion chips ---------------------------------------------------- */
+
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  animation: fade-in 0.25s ease;
+}
+
+.suggestions.is-centered {
+  justify-content: center;
+}
+
+.suggestion-chip {
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.suggestion-chip:hover {
+  border-color: var(--accent-border);
+  color: var(--text-primary);
+  background: var(--accent-soft);
+}
+
+.suggestion-chip:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 1px;
+}
+
+.suggestions.is-reply .suggestion-chip {
+  border-color: var(--accent-border);
+  color: var(--series-1);
+  font-weight: 500;
+}
+
+/* --- Toolbar, welcome, input -------------------------------------------- */
+
+.chat-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.new-chat-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.new-chat-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--baseline);
+}
+
+.new-chat-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.welcome {
+  text-align: center;
+  padding: 48px 0 32px;
+}
+
+.welcome-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.welcome-sub {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin: 0 0 20px;
+}
+
+.query-submit.is-stop {
+  background: var(--text-primary);
+  color: var(--page-plane);
+}
+
+.stop-square {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.query-hint {
+  margin: 6px 0 0;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* --- Visualization header / toggle --------------------------------------- */
+
+.viz {
+  margin-top: 16px;
+}
+
+.viz-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.viz-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.viz-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.viz-toggle button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.viz-toggle button.is-active {
+  background: var(--gridline);
+  color: var(--text-primary);
+}
+
+/* Answers keep the full card width (charts size to their container); only the
+   clarification card shrinks to its content. */
+.assistant-row:not(.is-clarification) > .response-card {
+  align-self: stretch;
+}
+
+/* Long result tables scroll inside the card (sticky header) instead of pushing the
+   conversation off-screen. */
+.viz-table-wrap {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.viz-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-1);
+}
+
+/* Auto-scroll target: keep the newest content (and its quick-reply chips) above the
+   sticky input box rather than underneath it. */
+.scroll-sentinel {
+  height: 1px;
+  scroll-margin-bottom: 150px;
+}
+
+/* Numeric columns right-aligned so values (and year-vs-year pairs) line up. */
+.viz-table th.is-num,
+.viz-table td.is-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.change-cell {
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.change-cell.is-up {
+  color: #1f8a5b;
+}
+
+.change-cell.is-down {
+  color: var(--status-critical);
+}
+
+:root[data-theme="dark"] .change-cell.is-up {
+  color: #4cc38a;
 }
