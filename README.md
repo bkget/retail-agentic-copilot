@@ -66,129 +66,13 @@ When the stack is running via `docker compose up -d`:
 
 ### 1. Request Processing & Guardrail Pipeline
 
-```mermaid
-flowchart TD
-    subgraph ClientLayer["🖥️ Frontend Client (Next.js 14)"]
-        UI["React Chat Interface<br/>(Recharts Visualization)"]
-        SSEClient["SSE Stream Listener<br/>(EventSource Client)"]
-    end
-
-    subgraph BackendAPI["⚡ Backend Service (FastAPI & Python 3.11)"]
-        Router["/api/query (SSE Endpoint)"]
-        SessionStore["Session Store: memory / Redis<br/>(history + pending clarification)"]
-        IntentClassifier{"Intent Classifier"}
-        DirectResponse["Direct Answer / Clarification"]
-        
-        subgraph AgentCore["🤖 Agent Orchestrator"]
-            LLMRouter["LLM Provider Router<br/>(MockLLMProvider / Gemini Flash)"]
-            SQLGen["SQL Query Generator"]
-        end
-        
-        subgraph Guardrail["🛡️ AST Guardrail (sqlglot)"]
-            ASTParse["Parse AST & Extract Nodes"]
-            TableCheck{"Table & Schema<br/>Allowlist Check"}
-            FuncCheck{"Function Allowlist<br/>Check"}
-            DMLCheck{"DML / CTE / DDL<br/>Walk Inspection"}
-            LimitInject["Inject Row LIMIT (<= 500)"]
-            Reserialize["Re-serialize AST to SQL"]
-        end
-
-        subgraph Engine["⚙️ Execution & Synthesizer"]
-            AsyncpgClient["Asyncpg Connection Pool"]
-            NarrativeSynth["Deterministic Python<br/>Narrative Synthesizer"]
-            ChartConfig["Chart JSON Formatter"]
-        end
-    end
-
-    subgraph DBLayer["🗄️ Database (PostgreSQL 17)"]
-        AgentRO[("agent_ro Role<br/>(Read-Only, 8s Timeout)")]
-        SemanticViews[("Semantic Layer Views<br/>mv_sales_daily_rollup<br/>mv_sales_analysis")]
-    end
-
-    UI -->|"1. Natural Language Query"| Router
-    Router <--> SessionStore
-    Router --> IntentClassifier
-    IntentClassifier -->|"Conversational / Greeting"| DirectResponse -->|"Stream SSE"| SSEClient
-    IntentClassifier -->|"Analytical Request"| LLMRouter
-    LLMRouter --> SQLGen
-    SQLGen -->|"Raw Generated SQL"| ASTParse
-    ASTParse --> TableCheck
-    TableCheck --> FuncCheck
-    FuncCheck --> DMLCheck
-    DMLCheck --> LimitInject
-    LimitInject --> Reserialize
-    
-    Reserialize -->|"Safe Re-serialized SQL"| AsyncpgClient
-    AsyncpgClient -->|"Execute Query"| AgentRO
-    AgentRO --> SemanticViews
-    SemanticViews -->|"Raw Result Rows"| AsyncpgClient
-    
-    AsyncpgClient --> NarrativeSynth
-    NarrativeSynth --> ChartConfig
-    ChartConfig -->|"Live SSE Events (Steps, SQL, Narrative, Chart, Suggestions)"| SSEClient
-    SSEClient --> UI
-
-    classDef client fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0369a1;
-    classDef backend fill:#f0fdf4,stroke:#16a34a,stroke-width:2px,color:#15803d;
-    classDef security fill:#fef2f2,stroke:#dc2626,stroke-width:2px,color:#b91c1c;
-    classDef db fill:#fefce8,stroke:#ca8a04,stroke-width:2px,color:#a16207;
-
-    class UI,SSEClient client;
-    class Router,SessionStore,IntentClassifier,DirectResponse,LLMRouter,SQLGen,AsyncpgClient,NarrativeSynth,ChartConfig backend;
-    class ASTParse,TableCheck,FuncCheck,DMLCheck,LimitInject,Reserialize security;
-    class AgentRO,SemanticViews db;
-```
+<img src="./architecture.png" alt="Request processing and AST guardrail pipeline - from browser query through intent classification, SQL generation, the AST guardrail, PostgreSQL execution, and back as narrative + chart SSE events" width="100%">
 
 ---
 
 ### 2. Database Schema Architecture & Semantic Lineage
 
-```mermaid
-flowchart TD
-    subgraph RawData["📦 Seed Data (1,000,000 Records)"]
-        CSV["db/seed/*.csv.gz"]
-    end
-
-    subgraph CoreSchema["🔒 Core 3NF Normalized Schema (core.*)"]
-        FactTable["core.fact_table<br/>(1M fact records, unit/total price numeric)"]
-        DimItem["core.item_dim<br/>(item_name, supplier, man_country)"]
-        DimStore["core.store_dim<br/>(division, district, upazila)"]
-        DimPayment["core.payment_dim<br/>(trans_type, bank_name)"]
-        DimTime["core.time_dim<br/>(date, year, quarter, month, day)"]
-        DimCustomer["core.customer_dim<br/>⚠️ PII ISOLATED & EXCLUDED"]
-    end
-
-    subgraph SecurityBoundary["🛡️ Security & Role Isolation"]
-        RefresherRole["refresher_rw Role<br/>(Owner of Materialized Views)"]
-        AgentRole["agent_ro Role<br/>(SELECT on public.* views only)"]
-    end
-
-    subgraph SemanticLayer["📊 2-Tier Semantic Layer (public.*)"]
-        Tier2["public.mv_sales_analysis<br/>• Tier 2: Row-level OBT for deep drilldowns<br/>• Surrogate fact_key, strict PII removal<br/>• Indexed by date, location, item"]
-        Tier1["public.mv_sales_daily_rollup<br/>• Tier 1: Pre-aggregated daily rollup<br/>• Grouped by date, year, month, division, district, item<br/>• SUM(total_revenue), SUM(total_units_sold), COUNT(*)"]
-    end
-
-    CSV -->|"gunzip + \copy on init"| FactTable & DimItem & DimStore & DimPayment & DimTime & DimCustomer
-
-    FactTable & DimItem & DimStore & DimPayment & DimTime -->|"Inner Join & PII Sanitization"| Tier2
-    Tier2 -->|"Daily Aggregation Rollup"| Tier1
-
-    RefresherRole -->|"APScheduler REFRESH CONCURRENTLY"| Tier2
-    RefresherRole -->|"APScheduler REFRESH CONCURRENTLY"| Tier1
-
-    AgentRole -->|"Read-Only Queries"| Tier1
-    AgentRole -->|"Read-Only Queries"| Tier2
-
-    classDef raw fill:#f3f4f6,stroke:#4b5563,stroke-width:1px,color:#1f2937;
-    classDef core fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#991b1b;
-    classDef semantic fill:#dcfce7,stroke:#22c55e,stroke-width:2px,color:#166534;
-    classDef roles fill:#fef3c7,stroke:#f59e0b,stroke-width:2px,color:#92400e;
-
-    class CSV raw;
-    class FactTable,DimItem,DimStore,DimPayment,DimTime,DimCustomer core;
-    class Tier1,Tier2 semantic;
-    class RefresherRole,AgentRole roles;
-```
+<img src="./database_schema_architecture.png" alt="Database schema architecture - normalized core.* 3NF schema, role isolation (agent_ro / refresher_rw), and the two-tier public.* semantic layer (mv_sales_analysis, mv_sales_daily_rollup)" width="100%">
 
 ---
 
@@ -205,39 +89,7 @@ The project includes an intelligent, colorized **Makefile** that automates conta
 make setup && make up
 ```
 
-Type `make` or `make help` to inspect all available targets:
-
-```
-Retail Agentic Copilot — Automation CLI
-
-Usage: make <target>
-
-  help                 Display this interactive help menu
-  setup                Initialize environment, secrets, and install backend dependencies
-  init-env             Create .env from .env.example if not already present
-  init-secrets         Ensure Docker secret files exist from .example templates
-  install              Install backend dependencies locally
-  up                   Build and launch full container stack (DB + Backend + Frontend)
-  down                 Stop and remove all containers and network bridges
-  restart              Restart the full container stack
-  ps                   List running containers and health statuses
-  logs                 Tail streaming logs from all services
-  logs-backend         Tail streaming logs from FastAPI backend
-  logs-db              Tail streaming logs from PostgreSQL database
-  logs-frontend        Tail streaming logs from Next.js frontend
-  db-shell-agent       Open psql shell as agent_ro role (read-only semantic layer)
-  db-shell-admin       Open psql shell as postgres superuser
-  db-reset             Hard reset database volume and re-seed 1M records (Caution: wipes data)
-  test                 Run unit and integration tests with pytest
-  test-slow            Run slow integration tests (including materialized view refresh)
-  eval                 Run Execution Accuracy (EX) benchmark with default mock router
-  eval-gemini          Run Execution Accuracy (EX) benchmark with Gemini provider
-  api-health           Verify backend health check via HTTP request
-  clean                Remove temporary python bytecode and test cache artifacts
-  clean-all            Complete teardown: remove containers, volumes, networks, and caches
-
-Quick Start: make setup && make up
-```
+Type `make` or `make help` to inspect all available targets.
 
 ---
 
@@ -518,8 +370,3 @@ Building against real 1,000,000-row retail data uncovered multiple subtle bugs t
 - **Eval Dataset Scope**: Golden evaluation set currently includes 30 representative test cases; expanding to 100+ cases is ongoing.
 - **Frontend Dependencies**: Built on Next.js 14 for stability; upgrade paths to Next.js 16 will follow upstream LTS patches.
 
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
