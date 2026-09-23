@@ -194,6 +194,47 @@ def _year_comparison_narrative(
     return " ".join(sentences)
 
 
+def _series_by_time_across_years_narrative(
+    resolved: ResolvedQuery, rows: list[dict], metric_col: str, fmt, currency_prefix: str, label: str
+) -> str:
+    dim, time_col = resolved.dimension, resolved.extra_dimension
+    money = lambda v: f"{currency_prefix}{fmt(v)}"  # noqa: E731
+    years = sorted({r["sale_year"] for r in rows})
+    first, last = years[0], years[-1]
+    per_year: dict[int, float] = {}
+    per_entity_year: dict[str, dict[int, float]] = {}
+    per_period_last: dict[object, float] = {}
+    for r in rows:
+        v = float(r.get(metric_col) or 0)
+        y = r["sale_year"]
+        per_year[y] = per_year.get(y, 0.0) + v
+        per_entity_year.setdefault(str(r[dim]), {})[y] = per_entity_year.get(str(r[dim]), {}).get(y, 0.0) + v
+        if y == last:
+            per_period_last[r[time_col]] = per_period_last.get(r[time_col], 0.0) + v
+    dim_word = dim.replace("store_", "").replace("item_", "").replace("_", " ")
+    time_word = time_col.replace("sale_", "")
+    n = len(per_entity_year)
+    pct = (per_year[last] - per_year[first]) / per_year[first] * 100 if per_year.get(first) else None
+    sentences = [
+        f"Comparing {time_word}ly {label} for the top {n} {dim_word}s in {first} and {last}: "
+        f"together they took {money(per_year[first])} in {first} and {money(per_year[last])} in {last}"
+        + (f" ({'up' if pct >= 0 else 'down'} {abs(pct):.1f}%)." if pct is not None else ".")
+    ]
+    leader, vals = max(per_entity_year.items(), key=lambda kv: kv[1].get(last, 0.0))
+    sentences.append(
+        f"**{leader}** led with {money(vals.get(first, 0.0))} in {first} and {money(vals.get(last, 0.0))} in {last}."
+    )
+    if len(per_period_last) >= 2:
+        best = max(per_period_last.items(), key=lambda kv: kv[1])
+        worst = min(per_period_last.items(), key=lambda kv: kv[1])
+        sentences.append(
+            f"In {last}, the strongest {time_word} was **{format_dimension_value(time_col, best[0])}** "
+            f"and the weakest **{format_dimension_value(time_col, worst[0])}**. "
+            f"On the chart, solid lines are {last} and dashed lines are {first}."
+        )
+    return " ".join(sentences)
+
+
 def _series_by_time_narrative(
     resolved: ResolvedQuery, rows: list[dict], metric_col: str, fmt, currency_prefix: str, label: str
 ) -> str:
@@ -213,6 +254,18 @@ def _series_by_time_narrative(
     dim_label = dim.replace("store_", "").replace("item_", "").replace("_", " ")
     time_label = time_col.replace("sale_", "")
     scope = _describe_scope(resolved)
+    if len(ranked) == 1 and len(per_period) >= 2:
+        name, total = ranked[0]
+        best = max(per_period.items(), key=lambda kv: kv[1])
+        worst = min(per_period.items(), key=lambda kv: kv[1])
+        avg = total / len(per_period)
+        return (
+            f"**{name}** is the {dim_label} with the highest {label}{scope}, with "
+            f"{currency_prefix}{fmt(total)} in total. {time_label.capitalize()} by {time_label}, its strongest "
+            f"{time_label} was **{format_dimension_value(time_col, best[0])}** ({currency_prefix}{fmt(best[1])}) and "
+            f"the weakest was **{format_dimension_value(time_col, worst[0])}** ({currency_prefix}{fmt(worst[1])}), "
+            f"against an average of {currency_prefix}{fmt(avg)} per {time_label}."
+        )
     limited = (
         f" (showing the top {resolved.series_limit} {dim_label}s by {label})"
         if resolved.series_limit and len(ranked) >= resolved.series_limit
@@ -289,6 +342,16 @@ def build_narrative(resolved: ResolvedQuery, columns: list[str], rows: list[dict
     label = _metric_label(metric_col)
     scope = _describe_scope(resolved)
 
+    if categorical_cols and len(rows) == 1 and resolved.top_n == 1:
+        row = rows[0]
+        name = _entity_label(row, categorical_cols)
+        dim_word = categorical_cols[-1].replace("store_", "").replace("item_", "").replace("sale_", "").replace("_", " ")
+        text = (
+            f"The {dim_word} with the highest {label}{scope} is **{name}**, "
+            f"at {currency_prefix}{fmt(float(row[metric_col]))}."
+        )
+        return NarrativeResult(text=_with_notes(text, resolved), formatting=formatting)
+
     if not categorical_cols or len(rows) == 1:
         total = sum(values)
         text = f"The {label}{scope} is {currency_prefix}{fmt(total)}."
@@ -302,6 +365,16 @@ def build_narrative(resolved: ResolvedQuery, columns: list[str], rows: list[dict
         and len(resolved.years) >= 2
     ):
         text = _year_comparison_narrative(resolved, rows, others, metric_col, fmt, currency_prefix, label)
+        return NarrativeResult(text=_with_notes(text, resolved), formatting=formatting)
+
+    if (
+        "sale_year" in categorical_cols
+        and len(resolved.years) >= 2
+        and resolved.extra_dimension in _TIME_COLUMNS
+        and resolved.dimension in categorical_cols
+        and resolved.dimension not in _TIME_COLUMNS
+    ):
+        text = _series_by_time_across_years_narrative(resolved, rows, metric_col, fmt, currency_prefix, label)
         return NarrativeResult(text=_with_notes(text, resolved), formatting=formatting)
 
     if (

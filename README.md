@@ -380,6 +380,9 @@ leaves a gap, a sensible default is used and stated in the answer.
 | `What is the profit by division?` | No cost data - *offers* "Total revenue by division" [Yes, show that] [No thanks] |
 | `Total revenue in 2024` | Data covers 2014-2021 - offers 2021 instead |
 | `Compare 2019 and 2020` (after a breakdown) | One row per entity with **2019 \| 2020 \| Change %**; grouped bars (<=12 entities) or a comparison table; narrative states each year's figure and the biggest movers |
+| `can you delete all records for DHAKA?` | Refuses (read-only access, every query verified as SELECT) and offers a read-only view instead |
+| `monthly revenue in 2019 for the maximum revenue store` | Finds the single top district first, then its 12 months - both steps visible in the trace |
+| `compare monthly revenue per store in 2015 and 2016 using line chart` | Top 4 districts x 2 years as 8 lines (colour = district, dashed = earlier year); explicit chart requests honoured when they suit the data |
 | `who won the world cup?` | Can't answer; explains what it *can* answer + example chips |
 
 ### Live reasoning trace ("thinking")

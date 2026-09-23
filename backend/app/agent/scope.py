@@ -81,6 +81,66 @@ _ACCEPT_DEFAULT_RE = re.compile(
 )
 
 
+# Data-modification requests. The agent's DB role is read-only and the AST guardrail
+# rejects DML anyway - but the user must get an explicit "no", not a report that
+# reads as if the request was carried out.
+_WRITE_INTENT_RE = re.compile(
+    r"\b(delete|remove|drop|truncate|erase|wipe|purge|insert|update|modify|edit|alter|"
+    r"overwrite|rename|reset|clear out)\b.{0,60}?\b(records?|rows?|data|tables?|entr(y|ies)|"
+    r"sales?|transactions?|values?|columns?|stores?|items?|products?|prices?|revenue|"
+    r"database|db|history|everything|all)\b",
+    re.IGNORECASE,
+)
+
+
+def is_write_request(text: str) -> bool:
+    return _WRITE_INTENT_RE.search(text) is not None
+
+
+def write_refusal(proposed_question: str | None) -> str:
+    text = (
+        "I can't do that - I have **read-only** access to the sales data, so I can't delete, "
+        "change, or add records (every query I run is verified to be a read-only SELECT). "
+        "Changes to the data need to go through your database administrator."
+    )
+    if proposed_question:
+        text += f"\n\nI can show you the data instead - for example **{proposed_question}**. Want me to run that?"
+    return text
+
+
+# "the maximum revenue generating store", "which district had the highest revenue":
+# a superlative over a SINGULAR entity asks for exactly one - the top 1.
+_SUPERLATIVE_RE = re.compile(
+    r"\b(max|maximum|highest|best|largest|biggest|leading|most|top|greatest|strongest)\b",
+    re.IGNORECASE,
+)
+
+
+def wants_single_top(text: str, singular_words: tuple[str, ...]) -> bool:
+    q = text.lower()
+    if not _SUPERLATIVE_RE.search(q):
+        return False
+    return any(
+        re.search(rf"\b{re.escape(w)}\b", q) and not re.search(rf"\b{re.escape(w)}s\b", q)
+        for w in singular_words
+    )
+
+
+_CHART_PREF_RE = re.compile(
+    r"\b(line|bar|column)\s*(chart|graph|plot)s?\b|\b(as|in|into|with) an? (table|grid)\b|\btable view\b|\btabular\b",
+    re.IGNORECASE,
+)
+
+
+def detect_chart_preference(text: str) -> str | None:
+    m = _CHART_PREF_RE.search(text)
+    if not m:
+        return None
+    if m.group(1):
+        return "line" if m.group(1).lower() == "line" else "bar"
+    return "table"
+
+
 def is_all_time(text: str) -> bool:
     return _ALL_TIME_RE.search(text) is not None
 
@@ -190,7 +250,12 @@ def describe_query(
     """e.g. "Total revenue by district and month in 2020" - phrased so that feeding it
     back through MockLLMProvider resolves to the same query."""
     label = metric_label(metric_alias or "total_revenue")
-    if top_n and dimension:
+    if top_n == 1 and dimension:
+        text = f"Top {dimension_label(dimension)} by {label}"
+        if extra_dimension:
+            text += f", by {dimension_label(extra_dimension)}"
+            extra_dimension = None
+    elif top_n and dimension:
         text = f"Top {top_n} {dimension_label(dimension)}s by {label}"
     else:
         text = label[0].upper() + label[1:]

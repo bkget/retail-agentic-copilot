@@ -163,6 +163,13 @@ export function ChartRenderer({ config }: { config: VisualizationConfig }) {
 
   if (chart_type === "multi_line") {
     const series = config.series_keys ?? columns.slice(1);
+    // Entity x year lines: colour = entity (group), dashed = earlier year.
+    const style = new Map((config.series_style ?? []).map((st) => [st.key, st]));
+    const groups = Array.from(new Set((config.series_style ?? []).map((st) => st.group)));
+    const colorFor = (s: string, i: number) => {
+      const st = style.get(s);
+      return palette[(st ? groups.indexOf(st.group) : i) % palette.length];
+    };
     return (
       <div className="viz">
         {header}
@@ -179,9 +186,10 @@ export function ChartRenderer({ config }: { config: VisualizationConfig }) {
                 type="monotone"
                 dataKey={s}
                 name={s}
-                stroke={palette[i % palette.length]}
-                strokeWidth={2}
-                dot={data.length <= 12 ? { r: 3, fill: palette[i % palette.length] } : false}
+                stroke={colorFor(s, i)}
+                strokeWidth={style.get(s)?.dashed ? 1.75 : 2.25}
+                strokeDasharray={style.get(s)?.dashed ? "5 4" : undefined}
+                dot={data.length <= 12 ? { r: style.get(s)?.dashed ? 2 : 3, fill: colorFor(s, i) } : false}
                 connectNulls
               />
             ))}

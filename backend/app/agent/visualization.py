@@ -17,7 +17,7 @@ the exact same payload renders as a table too (the frontend offers that toggle).
 from __future__ import annotations
 
 import calendar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from numbers import Number
 
 MAX_CHART_ROWS = 25
@@ -63,7 +63,9 @@ class VisualizationConfig:
     y_axis_key: str | None = None  # bar/line (metric column); multi_line: metric name
     columns: list[str] = field(default_factory=list)  # table header order
     data: list[dict] = field(default_factory=list)
-    series_keys: list[str] = field(default_factory=list)  # multi_line only
+    series_keys: list[str] = field(default_factory=list)  # multi_line / grouped_bar
+    # Per-series styling for entity x year lines: {"key", "group" (colour), "dashed"}.
+    series_style: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -75,6 +77,7 @@ class VisualizationConfig:
             "columns": self.columns,
             "data": self.data,
             "series_keys": self.series_keys,
+            "series_style": self.series_style,
         }
 
 
@@ -153,6 +156,76 @@ def _year_comparison(key_cols: list[str], y_key: str, rows: list[dict]) -> Visua
     )
 
 
+def _multi_line_by_year(
+    entity: str, x_key: str, y_key: str, rows: list[dict]
+) -> VisualizationConfig:
+    """<entity> x <month|quarter> x <year>: one line per (entity, year) - colour encodes
+    the entity, a dashed stroke marks earlier years - so "DHAKA 2015 vs DHAKA 2016" sit
+    on the same axis and read at a glance, instead of a 3-column table."""
+    totals: dict[str, float] = {}
+    for r in rows:
+        totals[str(r[entity])] = totals.get(str(r[entity]), 0.0) + float(r[y_key] or 0)
+    entities = [k for k, _ in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)][: MAX_SERIES // 2]
+    years = sorted({r["sale_year"] for r in rows})
+    latest = years[-1]
+    series, style = [], []
+    for e in entities:
+        for y in years:
+            key = f"{e} {y}"
+            series.append(key)
+            style.append({"key": key, "group": e, "dashed": y != latest})
+    kept = set(entities)
+    pivot: dict[object, dict] = {}
+    for r in rows:
+        if str(r[entity]) not in kept:
+            continue
+        x = r[x_key]
+        pivot.setdefault(x, {x_key: _time_label(x_key, x)})[f"{r[entity]} {r['sale_year']}"] = _to_float(r[y_key])
+    data = [pivot[x] for x in sorted(pivot, key=_sort_key)]
+    return VisualizationConfig(
+        render_chart=True,
+        chart_type="multi_line",
+        title=f"{y_key.replace('_', ' ').title()} by {x_key.replace('sale_', '').title()}: "
+        + " vs ".join(map(str, years)) + f" by {entity.replace('store_', '').replace('_', ' ').title()}",
+        x_axis_key=x_key,
+        y_axis_key=y_key,
+        columns=[x_key, *series],
+        data=data,
+        series_keys=series,
+        series_style=style,
+    )
+
+
+def apply_chart_preference(
+    viz: VisualizationConfig, preference: str | None
+) -> tuple[VisualizationConfig, str | None]:
+    """Honours "as a table" / "using a line chart" / "as a bar chart" when the data
+    suits it; otherwise keeps the better chart and says why (returned note)."""
+    if not preference or not viz.render_chart or viz.chart_type == preference:
+        return viz, None
+    if preference == "table":
+        return replace(viz, chart_type="table"), None
+    x_is_time = viz.x_axis_key in _TIME_COLUMNS_FINEST_FIRST
+    if preference == "line":
+        if viz.chart_type == "bar" and x_is_time:
+            return replace(viz, chart_type="line"), None
+        if viz.chart_type == "multi_line":
+            return viz, None
+        return viz, (
+            "A line chart is best for trends over time; this compares separate categories, "
+            "so I kept bars - they're easier to compare side by side."
+        )
+    if preference == "bar":
+        if viz.chart_type == "line":
+            return replace(viz, chart_type="bar"), None
+        if viz.chart_type == "multi_line" and not viz.series_style:
+            return replace(viz, chart_type="grouped_bar"), None
+        if viz.chart_type == "grouped_bar":
+            return viz, None
+        return viz, "This many series is hard to read as bars, so I kept a line chart."
+    return viz, None
+
+
 def build_visualization(columns: list[str], rows: list[dict]) -> VisualizationConfig:
     if not rows:
         return VisualizationConfig(render_chart=False)
@@ -166,6 +239,11 @@ def build_visualization(columns: list[str], rows: list[dict]) -> VisualizationCo
     y_key = numeric_cols[-1]
 
     others = [c for c in categorical_cols if c != "sale_year"]
+    if "sale_year" in categorical_cols and len(others) == 2 and len({r.get("sale_year") for r in rows}) >= 2:
+        time_others = [c for c in others if c in _TIME_COLUMNS_FINEST_FIRST]
+        entity_others = [c for c in others if c not in _TIME_COLUMNS_FINEST_FIRST]
+        if len(time_others) == 1 and len(entity_others) == 1:
+            return _multi_line_by_year(entity_others[0], time_others[0], y_key, rows)
     if (
         "sale_year" in categorical_cols
         and others

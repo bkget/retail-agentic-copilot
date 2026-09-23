@@ -51,7 +51,7 @@ from app.agent.llm_provider import (
 )
 from app.agent.narrative import build_narrative
 from app.agent.nlu_fallback import QuestionRewriter
-from app.agent.visualization import VisualizationConfig, build_visualization
+from app.agent.visualization import VisualizationConfig, apply_chart_preference, build_visualization
 from app.observability.tracing import get_tracer
 from app.schema.catalog import SchemaCatalog
 from app.security.ast_guardrail import MAX_ROW_LIMIT, GuardrailViolation, validate_and_reserialize_sql
@@ -227,6 +227,9 @@ class Orchestrator:
         signals = classification.extracted_signals
         catalog = turn.catalog
 
+        if scope.is_write_request(text):
+            return await self._refuse_write(turn, text)
+
         if intent == Intent.GREETING:
             return await self._respond(
                 turn, "conversational", GREETING_REPLY, scope.example_questions(catalog.year_max)
@@ -322,7 +325,7 @@ class Orchestrator:
         # A message naming something the data can't answer (profit, customers...) is a
         # new question, never an "answer" to be merged - merging would silently drop
         # the concept and answer a different question.
-        if scope.detect_unsupported(text, turn.year_range) is not None:
+        if scope.detect_unsupported(text, turn.year_range) is not None or scope.is_write_request(text):
             return None
 
         if pending.kind == "confirm_rewrite":
@@ -388,6 +391,7 @@ class Orchestrator:
             years=years,
             top_n=mapping.top_n or partial.top_n,
             notes=tuple(notes),
+            chart_preference=mapping.chart_preference or partial.chart_preference,
         )
         combined = scope.describe_query(
             resolved.metric_alias, resolved.dimension, resolved.extra_dimension, resolved.year,
@@ -401,6 +405,30 @@ class Orchestrator:
             f'Combined your reply with the earlier question "{pending.original_question}" -> {combined}',
         )
         return await self._answer_query(turn, resolved)
+
+    async def _refuse_write(self, turn: _Turn, text: str) -> AnswerResult:
+        mapping = await self._map(turn, text)
+        dimension = mapping.compare_dimension or mapping.dimension_intent
+        values = tuple(v for f in mapping.filters for v in f.values)
+        proposed = None
+        if dimension or values or mapping.year:
+            proposed = scope.describe_query(
+                mapping.metric_intent or "total_revenue", dimension, None, mapping.year, (), None, values
+            )
+        await turn.steps.done(
+            "scope", "Checking what I'm allowed to do",
+            "Data-modification request - refused (read-only access)", status="warning",
+        )
+        return await self._respond(
+            turn,
+            "conversational" if proposed is None else "clarification",
+            scope.write_refusal(proposed),
+            [f"Yes, show that", "No thanks"] if proposed else scope.example_questions(turn.catalog.year_max),
+            pending=(
+                PendingClarification("confirm_rewrite", text, ResolvedQuery(), proposed_question=proposed)
+                if proposed else None
+            ),
+        )
 
     async def _offer_reshape(self, turn: _Turn, text: str, unsupported: scope.UnsupportedConcept) -> AnswerResult:
         mapping = await self._map(turn, text)
@@ -520,7 +548,9 @@ class Orchestrator:
             return await self._offer_year_in_range(turn, resolved, out_of_range)
         resolved = replace(
             resolved,
-            series_limit=series_limit_for(resolved.dimension, resolved.extra_dimension, resolved.top_n),
+            series_limit=series_limit_for(
+                resolved.dimension, resolved.extra_dimension, resolved.top_n, resolved.years
+            ),
             period_label=turn.year_range if resolved.year is None and not resolved.years else None,
         )
         plan = (
@@ -533,6 +563,17 @@ class Orchestrator:
         )
         if not resolved.is_listing and resolved.period_label:
             plan += f" ({resolved.period_label})"
+        if resolved.series_limit and resolved.extra_dimension and resolved.dimension:
+            n = resolved.series_limit
+            who = f"the top {scope.dimension_label(resolved.dimension)}" if n == 1 else (
+                f"the top {n} {scope.dimension_label(resolved.dimension)}s"
+            )
+            plan = (
+                f"1) Find {who} by {scope.metric_label(resolved.metric_alias)}"
+                f"{' in ' + ' and '.join(map(str, resolved.years or (resolved.year,))) if (resolved.years or resolved.year) else ''}; "
+                f"2) break {'it' if n == 1 else 'them'} down by {scope.dimension_label(resolved.extra_dimension)}"
+                + (" and year" if len(resolved.years) >= 2 else "")
+            )
         await steps.done("plan", "Planning the analysis", plan)
 
         t_total_start = time.monotonic()
@@ -585,11 +626,18 @@ class Orchestrator:
                     continue
                 sql_ms += int((time.monotonic() - t0) * 1000)
                 span.set_attribute("copilot.row_count", len(rows))
-            await steps.done("execute", "Running the query", f"{len(rows)} row{'s' if len(rows) != 1 else ''} returned")
+            detail = f"{len(rows)} row{'s' if len(rows) != 1 else ''} returned"
+            if resolved.series_limit == 1 and rows and resolved.dimension in rows[0]:
+                detail += f" - top {scope.dimension_label(resolved.dimension)}: {rows[0][resolved.dimension]}"
+            await steps.done("execute", "Running the query", detail)
 
             await steps.start("answer", "Summarizing the results")
             narrative = build_narrative(resolved, columns, rows)
-            visualization = build_visualization(columns, rows)
+            visualization, chart_note = apply_chart_preference(
+                build_visualization(columns, rows), resolved.chart_preference
+            )
+            if chart_note:
+                narrative = replace(narrative, text=f"{narrative.text}\n\nNote: {chart_note}")
             suggestions = (
                 []
                 if resolved.is_listing

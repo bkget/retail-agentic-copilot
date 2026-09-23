@@ -305,3 +305,77 @@ class TestYearComparison:
         by_div_2020 = {r["store_division"]: r["2020"] for r in both.visualization.data}
         for r in only_2020.visualization.data:
             assert abs(by_div_2020[r["store_division"]] - r["total_revenue"]) < 0.01
+
+
+class TestUserReportRound3:
+    async def test_delete_request_is_refused_even_mid_conversation(self, orchestrator, catalog):
+        sid = "del-1"
+        await orchestrator.answer("Total revenue by district in 2019", catalog, sid)
+        result = await orchestrator.answer("can you delete all records for DHAKA store?", catalog, sid)
+        assert result.sql_executed is None
+        assert "read-only" in result.narrative_text
+        assert "can't" in result.narrative_text
+        # Offers something it CAN do instead, and "yes" runs it.
+        follow = await orchestrator.answer("yes", catalog, sid)
+        assert follow.response_type == "query"
+        assert "DELETE" not in follow.sql_executed.upper()
+
+    @pytest.mark.parametrize(
+        "message",
+        ["drop the sales table", "update the price of all items", "remove all transactions from 2019",
+         "insert a new record for Dhaka"],
+    )
+    async def test_other_write_requests_are_refused(self, orchestrator, catalog, message):
+        result = await orchestrator.answer(message, catalog, f"w-{message}")
+        assert result.sql_executed is None
+        assert "read-only" in result.narrative_text
+
+    async def test_maximum_revenue_store_by_month_is_the_single_top_district(self, orchestrator, catalog):
+        steps: list[dict] = []
+
+        async def on_step(step):
+            steps.append(step)
+
+        result = await orchestrator.answer(
+            "I want to see the monthly distribution of revenue in the year 2019 for the maximum revenue "
+            "generating store. Make sure to first identify the distinct with a maximum revenue",
+            catalog, "top1", on_step=on_step,
+        )
+        assert result.response_type == "query"
+        assert "LIMIT 1)" in result.sql_executed
+        assert "sale_year = 2019" in result.sql_executed
+        assert result.row_count == 12
+        assert result.visualization.series_keys == ["DHAKA"]
+        assert "is the district with the highest total revenue" in result.narrative_text
+        plan = next(s for s in steps if s["id"] == "plan")["detail"]
+        assert plan.startswith("1) Find the top district")
+        execute = [s for s in steps if s["id"] == "execute" and s["status"] == "done"][0]["detail"]
+        assert "top district: DHAKA" in execute
+
+    async def test_which_year_had_highest_revenue_names_the_year(self, orchestrator, catalog):
+        result = await orchestrator.answer("Which year had the highest revenue?", catalog, "top-year")
+        assert result.row_count == 1
+        assert "The year with the highest total revenue" in result.narrative_text
+
+    async def test_monthly_per_store_across_two_years_as_line_chart(self, orchestrator, catalog):
+        result = await orchestrator.answer(
+            "compare monthly revenue per store in the year 2015 and 2016 using line chart", catalog, "yy-line"
+        )
+        assert "GROUP BY store_district, sale_month, sale_year" in result.sql_executed
+        assert "LIMIT 4)" in result.sql_executed  # 4 districts x 2 years = 8 lines
+        viz = result.visualization
+        assert viz.chart_type == "multi_line"
+        assert viz.x_axis_key == "sale_month" and len(viz.data) == 12
+        assert len(viz.series_keys) == 8
+        assert {s["dashed"] for s in viz.series_style} == {True, False}
+        assert "DHAKA 2015" in viz.series_keys and "DHAKA 2016" in viz.series_keys
+        assert "in 2015" in result.narrative_text and "in 2016" in result.narrative_text
+
+    async def test_explicit_table_request_is_honoured(self, orchestrator, catalog):
+        result = await orchestrator.answer("Total revenue by division in 2020 as a table", catalog, "pref-t")
+        assert result.visualization.chart_type == "table"
+
+    async def test_unsuitable_line_request_explains_why_bars_were_kept(self, orchestrator, catalog):
+        result = await orchestrator.answer("Total revenue by division in 2020 using a line chart", catalog, "pref-l")
+        assert result.visualization.chart_type == "bar"
+        assert "line chart is best for trends over time" in result.narrative_text

@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 
+from app.agent.scope import detect_chart_preference, wants_single_top
 from app.schema.catalog import SchemaCatalog
 
 # ============================================================================
@@ -141,6 +142,7 @@ class TermMappingResult:
     all_time: bool = False
     # Human-readable assumptions made while mapping (surfaced in the answer).
     notes: tuple[str, ...] = ()
+    chart_preference: str | None = None  # "line" | "bar" | "table" - asked for explicitly
 
 
 # ============================================================================
@@ -172,6 +174,7 @@ class ResolvedQuery:
     # e.g. "2014-2021" - set by the orchestrator when no year filter applies, so the
     # narrative states the period instead of leaving "all time" implicit.
     period_label: str | None = None
+    chart_preference: str | None = None
 
 
 def resolve_with_session(
@@ -231,6 +234,7 @@ def resolve_with_session(
         top_n=mapping.top_n,
         extra_dimension=extra_dimension if extra_dimension != dimension else None,
         notes=mapping.notes,
+        chart_preference=mapping.chart_preference,
     )
 
 
@@ -637,12 +641,19 @@ def _pick_dimensions(matched: list[str]) -> tuple[str | None, str | None]:
     return time[0], None
 
 
-def series_limit_for(dimension: str | None, extra_dimension: str | None, top_n: int | None) -> int | None:
+DEFAULT_SERIES_LIMIT_ACROSS_YEARS = 4  # 4 entities x 2 years = 8 readable lines
+
+
+def series_limit_for(
+    dimension: str | None, extra_dimension: str | None, top_n: int | None, years: tuple[int, ...] = ()
+) -> int | None:
     if not (dimension and extra_dimension and extra_dimension in _TIME_DIMENSION_COLUMNS):
         return None
     if top_n:
         return top_n
-    return DEFAULT_SERIES_LIMIT if dimension in _SERIES_CAPPED_DIMENSIONS else None
+    if dimension not in _SERIES_CAPPED_DIMENSIONS:
+        return None
+    return DEFAULT_SERIES_LIMIT_ACROSS_YEARS if len(years) >= 2 else DEFAULT_SERIES_LIMIT
 
 
 def _metric_sql_expr(metric_alias: str, use_tier2: bool) -> str:
@@ -759,6 +770,15 @@ class MockLLMProvider(LLMProvider):
 
         years = _extract_years(q)
         top_n_match = _TOP_N_RE.search(q)
+        top_n = int(top_n_match.group(1)) if top_n_match else None
+        if top_n is None and dimension_intent is not None:
+            # "the maximum revenue generating store" / "which year had the highest
+            # revenue": a superlative over a singular entity means exactly one.
+            singular = tuple(
+                w for col, words in _DIMENSION_SYNONYMS if col == dimension_intent for w in words
+            )
+            if wants_single_top(q, singular):
+                top_n = 1
 
         return TermMappingResult(
             mappings=mappings,
@@ -768,10 +788,11 @@ class MockLLMProvider(LLMProvider):
             compare_dimension=compare_dimension,
             year=years[0] if len(years) == 1 else None,
             years=years,
-            top_n=int(top_n_match.group(1)) if top_n_match else None,
+            top_n=top_n,
             extra_dimension=extra_dimension,
             all_time=_ALL_TIME_RE.search(q) is not None,
             notes=tuple(notes),
+            chart_preference=detect_chart_preference(q),
         )
 
     async def generate_sql(

@@ -10,7 +10,8 @@ export interface VisualizationConfig {
   y_axis_key: string | null;
   columns: string[]; // table header order (also the pivoted columns for multi_line)
   data: Record<string, string | number | null>[];
-  series_keys?: string[]; // multi_line only
+  series_keys?: string[]; // multi_line / grouped_bar
+  series_style?: { key: string; group: string; dashed: boolean }[]; // entity x year lines
 }
 
 export type ResponseType = "conversational" | "clarification" | "query";
