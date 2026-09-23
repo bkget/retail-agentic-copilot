@@ -13,11 +13,11 @@
 Ask questions in plain English; a Google ADK / Gemini Flash agent transforms intent into SQL against a hardened 2-tier semantic layer, an independent AST guardrail (`sqlglot`) validates and re-serializes the query before execution, and the result streams back live via Server-Sent Events (SSE) with deterministic narrative calculations and typed visualizations.
 
 > [!NOTE]
-> **Built for Real Data Integrity**: Unlike toy demos with synthetic fixtures, this copilot is built and benchmarked against 1,000,000 real retail transaction records. Real data uncovered non-associative float summing errors, regex keyword collisions, and PII leakage risks that synthetic tests ignored. See [What Real Data Caught](#what-real-data-caught).
+> **Built for Real Data Integrity**: Unlike toy demos with synthetic fixtures, this copilot is built and benchmarked against 1,000,000 real retail transaction records. Real data uncovered non-associative float summing errors, regex keyword collisions, and PII leakage risks that synthetic tests ignored.
 
 ---
 
-## 📑 Table of Contents
+## Table of Contents
 
 - [Quick Access & Service Endpoints](#quick-access--service-endpoints)
 - [Key Features](#key-features)
@@ -62,7 +62,7 @@ When the stack is running via `docker compose up -d`:
 
 ---
 
-## 🏛️ Architecture & Data Flow
+## Architecture & Data Flow
 
 ### 1. Request Processing & Guardrail Pipeline
 
@@ -76,9 +76,8 @@ When the stack is running via `docker compose up -d`:
 
 ---
 
----
 
-## 🛠️ Project Automation & Execution (Makefile & Docker)
+## Project Automation & Execution (Makefile & Docker)
 
 The project includes an intelligent, colorized **Makefile** that automates container lifecycle, secret initialization, testing, and evaluation.
 
@@ -127,7 +126,7 @@ docker compose up -d --build
 
 ---
 
-## 🗄️ Database Connection & Schema Reference
+## Database Connection & Schema Reference
 
 ### 1. Database Roles & Connection Credentials
 
@@ -287,7 +286,7 @@ If the LLM is slow, over quota or down, the turn degrades to the deterministic r
 
 ---
 
-## 🧪 Testing & Evaluation Harness
+## Testing & Evaluation Harness
 
 ### 1. Running Unit & Integration Tests
 
