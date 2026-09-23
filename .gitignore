@@ -19,3 +19,7 @@ frontend/out/
 
 # editor/OS
 .DS_Store
+
+# build artifacts
+*.egg-info/
+backend/.venv/

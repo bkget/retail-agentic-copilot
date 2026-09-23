@@ -162,9 +162,11 @@ class TestConversationalIntent:
         assert first.response_type == "query"
         assert "sale_year" in first.sql_executed
 
-        second = await orchestrator.answer("Only for 2024", catalog, "s1")
+        # 2020, not 2024: the data covers 2014-2021, and an out-of-range year now gets
+        # an explanation + nearest-year offer instead of an empty query.
+        second = await orchestrator.answer("Only for 2020", catalog, "s1")
         assert second.response_type == "query"
-        assert "sale_year = 2024" in second.sql_executed
+        assert "sale_year = 2020" in second.sql_executed
         # Must inherit the year grouping from turn 1, not fall back to an unrelated
         # ungrouped default aggregate.
         assert "GROUP BY sale_year" in second.sql_executed
@@ -509,7 +511,7 @@ class TestMultiYearComparison:
         )
         assert "sale year and sale quarter" in result.narrative_text.lower()
 
-    async def test_two_dimension_result_renders_as_a_table_not_a_combined_label_chart(
+    async def test_two_dimension_result_renders_one_line_per_year_not_a_combined_label_chart(
         self, orchestrator, catalog
     ):
         """A single-series line/bar chart can't represent two independent dimensions
@@ -519,9 +521,9 @@ class TestMultiYearComparison:
             "Compare total revenue by quarter for 2019 and 2020", catalog, "s"
         )
         assert result.visualization.render_chart is True
-        assert result.visualization.chart_type == "table"
-        assert result.visualization.columns == ["sale_year", "sale_quarter", "total_revenue"]
-        assert len(result.visualization.data) == 8
+        assert result.visualization.chart_type == "multi_line"
+        assert result.visualization.columns == ["sale_quarter", "2019", "2020"]
+        assert len(result.visualization.data) == 4  # Q1..Q4, one line per year
 
 
 async def test_orchestrator_error_on_repeated_guardrail_failure(orchestrator, catalog, monkeypatch):

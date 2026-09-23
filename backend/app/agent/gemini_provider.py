@@ -34,6 +34,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 from app.agent.llm_provider import (
+    _ALL_TIME_RE,
     _DIMENSION_SYNONYMS,
     _METRIC_SYNONYMS,
     _REFERENCES_PREVIOUS_PHRASES,
@@ -227,6 +228,7 @@ class GeminiADKProvider(LLMProvider):
             year=years[0] if len(years) == 1 else None,
             years=years,
             top_n=int(top_n_match.group(1)) if top_n_match else None,
+            all_time=_ALL_TIME_RE.search(q) is not None,
         )
 
     async def generate_sql(
@@ -237,10 +239,25 @@ class GeminiADKProvider(LLMProvider):
         error_feedback: str | None = None,
     ) -> str:
         prompt = self._build_prompt(question, catalog.as_prompt_context(), resolved, error_feedback)
-        reply = await self._run_single_turn(self._runner, prompt)
+        reply = await self._run_single_turn("generator", prompt)
         return _strip_markdown_fence(reply)
 
-    async def _run_single_turn(self, runner: Runner, prompt: str) -> str:
+    async def _run_single_turn(self, role: str, prompt: str) -> str:
+        """Runs one prompt for `role` ("classifier" | "mapper" | "generator"). On a
+        quota/rate-limit error, advances to the next model in the fallback chain and
+        retries, so one exhausted free-tier quota doesn't take the feature down."""
+        while True:
+            runner = getattr(self, _ROLE_RUNNER_ATTR[role])
+            try:
+                return await self._run_with_runner(runner, prompt)
+            except genai_errors.ClientError as exc:
+                is_quota = getattr(exc, "code", None) == 429 or "RESOURCE_EXHAUSTED" in str(exc)
+                if not is_quota or self._model_index + 1 >= len(self._models):
+                    raise
+                self._model_index += 1
+                self._build_agents(self._models[self._model_index])
+
+    async def _run_with_runner(self, runner: Runner, prompt: str) -> str:
         """Each call gets its own session - there's no need to lean on ADK's own
         session/memory machinery, since conversation/resolution state is already
         threaded through the prompt text by the caller. All three runners share
@@ -297,7 +314,12 @@ class GeminiADKProvider(LLMProvider):
             )
             group_by_cols = (["sale_year"] if len(resolved.years) >= 2 else []) + (
                 [resolved.dimension] if resolved.dimension else []
-            )
+            ) + ([resolved.extra_dimension] if resolved.extra_dimension else [])
+            if resolved.series_limit and resolved.dimension:
+                lines.append(
+                    f"Only include the top {resolved.series_limit} {resolved.dimension} values by the "
+                    f"metric (use a subquery: {resolved.dimension} IN (SELECT ... LIMIT {resolved.series_limit}))."
+                )
             if group_by_cols:
                 lines.append(f"Group by: {', '.join(group_by_cols)}")
             if resolved.filters:

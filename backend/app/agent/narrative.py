@@ -20,6 +20,7 @@ opening sentence instead.
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from numbers import Number
 
@@ -87,6 +88,22 @@ def _format_value(value: float, unit: str, decimals: int) -> str:
     return f"{value:,.{decimals}f}{_UNIT_SUFFIX[unit]}"
 
 
+_TIME_COLUMNS = ("sale_month", "sale_quarter", "sale_year", "sale_date")
+
+
+def format_dimension_value(column: str, value: object) -> str:
+    """Month numbers read as months ("December", not "12") everywhere they're quoted."""
+    if column == "sale_month" and isinstance(value, int) and 1 <= value <= 12:
+        return calendar.month_name[value]
+    return str(value)
+
+
+def _with_notes(text: str, resolved: ResolvedQuery) -> str:
+    if not resolved.notes:
+        return text
+    return text + "\n\n" + " ".join(f"Note: {n}" for n in resolved.notes)
+
+
 def _describe_scope(resolved: ResolvedQuery) -> str:
     """A natural trailing clause describing the filters/time range in play - e.g.
     " for Dhaka" or " for 2019 and 2020" - the prose replacement for the old separate
@@ -97,15 +114,64 @@ def _describe_scope(resolved: ResolvedQuery) -> str:
         parts.append(" and ".join(str(y) for y in resolved.years))
     elif resolved.year is not None:
         parts.append(str(resolved.year))
+    period = ""
+    if resolved.year is None and len(resolved.years) < 2 and resolved.period_label:
+        period = f" over {resolved.period_label}"
     if not parts:
-        return ""
-    return " for " + ", ".join(parts)
+        return period
+    return " for " + ", ".join(parts) + period
+
+
+def _series_by_time_narrative(
+    resolved: ResolvedQuery, rows: list[dict], metric_col: str, fmt, currency_prefix: str, label: str
+) -> str:
+    """<entity> x <time> results (e.g. revenue per district per month): rank the
+    entities by their total across the period, then call out the strongest and weakest
+    period across all of them - the two things people actually read such a chart for."""
+    dim, time_col = resolved.dimension, resolved.extra_dimension
+    per_series: dict[str, float] = {}
+    per_period: dict[object, float] = {}
+    for r in rows:
+        v = r.get(metric_col)
+        if v is None:
+            continue
+        per_series[str(r.get(dim))] = per_series.get(str(r.get(dim)), 0.0) + float(v)
+        per_period[r.get(time_col)] = per_period.get(r.get(time_col), 0.0) + float(v)
+    ranked = sorted(per_series.items(), key=lambda kv: kv[1], reverse=True)
+    dim_label = dim.replace("store_", "").replace("item_", "").replace("_", " ")
+    time_label = time_col.replace("sale_", "")
+    scope = _describe_scope(resolved)
+    limited = (
+        f" (showing the top {resolved.series_limit} {dim_label}s by {label})"
+        if resolved.series_limit and len(ranked) >= resolved.series_limit
+        else ""
+    )
+    sentences = [
+        f"Looking at {label} by {dim_label} and {time_label}{scope}{limited}, "
+        f"**{ranked[0][0]}** leads with {currency_prefix}{fmt(ranked[0][1])} in total"
+        + (f", followed by **{ranked[1][0]}** at {currency_prefix}{fmt(ranked[1][1])}" if len(ranked) > 1 else "")
+        + "."
+    ]
+    if len(per_period) >= 2:
+        best = max(per_period.items(), key=lambda kv: kv[1])
+        worst = min(per_period.items(), key=lambda kv: kv[1])
+        sentences.append(
+            f"Across these {len(ranked)} {dim_label}s, the strongest {time_label} was "
+            f"**{format_dimension_value(time_col, best[0])}** ({currency_prefix}{fmt(best[1])}) "
+            f"and the weakest was **{format_dimension_value(time_col, worst[0])}** "
+            f"({currency_prefix}{fmt(worst[1])})."
+        )
+    return " ".join(sentences)
 
 
 def build_narrative(resolved: ResolvedQuery, columns: list[str], rows: list[dict]) -> NarrativeResult:
     if not rows:
         return NarrativeResult(
-            text="No rows matched this query.",
+            text=_with_notes(
+                "No sales matched this question - the filters may be too narrow "
+                "(for example, a name that doesn't appear in the data).",
+                resolved,
+            ),
             formatting={"currency": CURRENCY, "unit": "units", "decimals": 0},
         )
 
@@ -154,7 +220,16 @@ def build_narrative(resolved: ResolvedQuery, columns: list[str], rows: list[dict
     if not categorical_cols or len(rows) == 1:
         total = sum(values)
         text = f"The {label}{scope} is {currency_prefix}{fmt(total)}."
-        return NarrativeResult(text=text, formatting=formatting)
+        return NarrativeResult(text=_with_notes(text, resolved), formatting=formatting)
+
+    if (
+        resolved.extra_dimension in _TIME_COLUMNS
+        and resolved.dimension in categorical_cols
+        and resolved.extra_dimension in categorical_cols
+        and resolved.dimension not in _TIME_COLUMNS
+    ):
+        text = _series_by_time_narrative(resolved, rows, metric_col, fmt, currency_prefix, label)
+        return NarrativeResult(text=_with_notes(text, resolved), formatting=formatting)
 
     # Handles 1+ categorical columns uniformly - a single column (the common case)
     # degenerates to exactly the old single-dimension wording; 2+ columns (e.g. a
@@ -163,9 +238,15 @@ def build_narrative(resolved: ResolvedQuery, columns: list[str], rows: list[dict
     # rest, which is what used to happen when categorical_cols[0] was the only column
     # ever consulted.
     dim_label = " and ".join(c.replace("_", " ") for c in categorical_cols)
+    is_hierarchy = categorical_cols == ["store_division", "store_district"]
+    if is_hierarchy:
+        dim_label = "district (within each division)"
 
     def combo_label(row: dict) -> str:
-        return " ".join(str(row[c]) for c in categorical_cols)
+        if is_hierarchy:
+            # "NARAIL (KHULNA)", not "KHULNA NARAIL" / "DHAKA DHAKA".
+            return f"{row['store_district']} ({row['store_division']})"
+        return " ".join(format_dimension_value(c, row[c]) for c in categorical_cols)
 
     ranked = sorted(rows, key=lambda r: (r.get(metric_col) or 0), reverse=True)
     n = len(ranked)
@@ -218,4 +299,4 @@ def build_narrative(resolved: ResolvedQuery, columns: list[str], rows: list[dict
                 f"{currency_prefix}{fmt(v2)} in {y2}{trend}."
             )
 
-    return NarrativeResult(text=" ".join(sentences), formatting=formatting)
+    return NarrativeResult(text=_with_notes(" ".join(sentences), resolved), formatting=formatting)

@@ -25,7 +25,7 @@ def test_narrative_is_deterministic():
 
 def test_narrative_handles_empty_rows():
     result = build_narrative(_BARE, [], [])
-    assert "No rows" in result.text
+    assert "No sales matched" in result.text
 
 
 def test_narrative_handles_single_scalar_aggregate():
@@ -137,14 +137,34 @@ def test_narrative_skips_year_over_year_delta_for_top_n_slice():
     assert "%" not in result.text
 
 
-def test_visualization_table_for_two_dimension_result():
+def test_visualization_multi_line_for_time_by_series_result():
+    """year x quarter: the finer time column is the x axis, one line per year - not a
+    single line over a combined "2019 Q1" label (which would read as one flat trend)."""
     rows = [
         {"sale_year": 2019, "sale_quarter": "Q1", "total_revenue": 1000.0},
         {"sale_year": 2020, "sale_quarter": "Q1", "total_revenue": 2000.0},
     ]
     viz = build_visualization(["sale_year", "sale_quarter", "total_revenue"], rows)
     assert viz.render_chart is True
+    assert viz.chart_type == "multi_line"
+    assert viz.x_axis_key == "sale_quarter"
+    assert viz.series_keys == ["2019", "2020"]
+    assert viz.columns == ["sale_quarter", "2019", "2020"]
+    assert viz.data == [{"sale_quarter": "Q1", "2019": 1000.0, "2020": 2000.0}]
+
+
+def test_visualization_table_for_two_non_time_dimensions():
+    rows = [
+        {"store_division": "DHAKA", "store_district": "GAZIPUR", "total_revenue": 10.0},
+        {"store_division": "DHAKA", "store_district": "DHAKA", "total_revenue": 20.0},
+    ]
+    viz = build_visualization(["store_division", "store_district", "total_revenue"], rows)
     assert viz.chart_type == "table"
-    assert viz.columns == ["sale_year", "sale_quarter", "total_revenue"]
-    assert viz.x_axis_key is None
-    assert len(viz.data) == 2
+    assert viz.columns == ["store_division", "store_district", "total_revenue"]
+
+
+def test_time_series_line_is_chronological_not_ranked():
+    rows = [{"sale_month": m, "total_revenue": float(100 - m)} for m in (3, 1, 2)]
+    viz = build_visualization(["sale_month", "total_revenue"], rows)
+    assert viz.chart_type == "line"
+    assert [d["sale_month"] for d in viz.data] == ["Jan", "Feb", "Mar"]

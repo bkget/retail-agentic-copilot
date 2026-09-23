@@ -2,18 +2,35 @@
 conservative: render_chart is false whenever there's no categorical dimension to plot
 against (a single scalar aggregate has nothing meaningful to chart), rather than
 fabricating a one-bar chart.
+
+Chart types:
+  * bar         - one categorical dimension, ranked by value
+  * line        - one time dimension, in chronological order
+  * multi_line  - one time dimension x one series dimension (e.g. revenue per district
+                  per month, or per year per quarter), pivoted so each series is a key
+  * table       - two non-time dimensions (e.g. division x district)
+
+For multi_line, `columns` is [x_key, *series_keys] and `data` is the pivoted rows, so
+the exact same payload renders as a table too (the frontend offers that toggle).
 """
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass, field
 from numbers import Number
 
 MAX_CHART_ROWS = 25
+MAX_SERIES = 8
+MAX_TABLE_ROWS = 100
 
 # Kept in sync with app.agent.narrative - see that module for why these integer-typed
 # columns must be treated as dimensions, not measures.
 _DIMENSION_LIKE_NUMERIC_COLUMNS = {"sale_year", "sale_month", "sale_day"}
+
+# Finest first - when two time columns are present (year x quarter), the finer one is
+# the x axis and the coarser one becomes the series (one line per year).
+_TIME_COLUMNS_FINEST_FIRST = ("sale_date", "sale_month", "sale_quarter", "sale_year")
 
 
 def _is_numeric(column: str, value: object) -> bool:
@@ -22,15 +39,31 @@ def _is_numeric(column: str, value: object) -> bool:
     return isinstance(value, Number) and not isinstance(value, bool)
 
 
+def _time_label(column: str, value: object) -> object:
+    if column == "sale_month" and isinstance(value, int) and 1 <= value <= 12:
+        return calendar.month_abbr[value]
+    return value
+
+
+def _sort_key(value: object) -> tuple:
+    return (0, value) if isinstance(value, (int, float)) else (1, str(value))
+
+
+def _title(y_key: str, dims: list[str]) -> str:
+    dims_text = " & ".join(c.replace("_", " ").title() for c in dims)
+    return f"{y_key.replace('_', ' ').title()} by {dims_text}"
+
+
 @dataclass(frozen=True)
 class VisualizationConfig:
     render_chart: bool
-    chart_type: str | None = None  # "bar" | "line" | "table"
+    chart_type: str | None = None  # "bar" | "line" | "multi_line" | "table"
     title: str | None = None
-    x_axis_key: str | None = None  # bar/line only
-    y_axis_key: str | None = None  # bar/line only
-    columns: list[str] = field(default_factory=list)  # table only: header order
+    x_axis_key: str | None = None  # bar/line/multi_line
+    y_axis_key: str | None = None  # bar/line (metric column); multi_line: metric name
+    columns: list[str] = field(default_factory=list)  # table header order
     data: list[dict] = field(default_factory=list)
+    series_keys: list[str] = field(default_factory=list)  # multi_line only
 
     def to_dict(self) -> dict:
         return {
@@ -41,7 +74,43 @@ class VisualizationConfig:
             "y_axis_key": self.y_axis_key,
             "columns": self.columns,
             "data": self.data,
+            "series_keys": self.series_keys,
         }
+
+
+def _to_float(v: object) -> float | None:
+    return float(v) if v is not None else None
+
+
+def _multi_line(x_key: str, series_key: str, y_key: str, rows: list[dict]) -> VisualizationConfig:
+    totals: dict[str, float] = {}
+    for r in rows:
+        totals[str(r[series_key])] = totals.get(str(r[series_key]), 0.0) + float(r[y_key] or 0)
+    # Chronological series (years) stay in order; entity series are ranked by total.
+    if series_key in _TIME_COLUMNS_FINEST_FIRST:
+        series = sorted(totals, key=_sort_key)[:MAX_SERIES]
+    else:
+        series = [k for k, _ in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)][:MAX_SERIES]
+    kept = set(series)
+
+    pivot: dict[object, dict] = {}
+    for r in rows:
+        s = str(r[series_key])
+        if s not in kept:
+            continue
+        x = r[x_key]
+        pivot.setdefault(x, {x_key: _time_label(x_key, x)})[s] = _to_float(r[y_key])
+    data = [pivot[x] for x in sorted(pivot, key=_sort_key)]
+    return VisualizationConfig(
+        render_chart=True,
+        chart_type="multi_line",
+        title=_title(y_key, [series_key, x_key]),
+        x_axis_key=x_key,
+        y_axis_key=y_key,
+        columns=[x_key, *series],
+        data=data,
+        series_keys=series,
+    )
 
 
 def build_visualization(columns: list[str], rows: list[dict]) -> VisualizationConfig:
@@ -56,41 +125,45 @@ def build_visualization(columns: list[str], rows: list[dict]) -> VisualizationCo
 
     y_key = numeric_cols[-1]
 
+    if len(categorical_cols) == 2:
+        time_cols = [c for c in _TIME_COLUMNS_FINEST_FIRST if c in categorical_cols]
+        if time_cols:
+            x_key = time_cols[0]
+            series_key = next(c for c in categorical_cols if c != x_key)
+            return _multi_line(x_key, series_key, y_key, rows)
+
     if len(categorical_cols) >= 2:
-        # More than one dimension column (e.g. a multi-year comparison also broken
-        # down by quarter) - a single x/y chart can't represent two independent
-        # dimensions without collapsing them into one combined label ("2020 Q4"),
-        # which reads as a single flat trend line rather than a real comparison. A
-        # table shows every value precisely instead, which is what this is for.
+        # Two independent non-time dimensions (e.g. division x district): a table
+        # shows every value precisely, preserving the SQL's own ORDER BY.
         table_cols = categorical_cols + [y_key]
-        ranked = rows[:MAX_CHART_ROWS]  # preserve the SQL's own ORDER BY - already
-        # meaningful (chronological for a time comparison, ranked for a top-N request)
         data = [
-            {c: (float(r[c]) if c == y_key and r[c] is not None else r[c]) for c in table_cols}
-            for r in ranked
+            {c: (_to_float(r[c]) if c == y_key else r[c]) for c in table_cols}
+            for r in rows[:MAX_TABLE_ROWS]
         ]
-        title_dims = " & ".join(c.replace("_", " ").title() for c in categorical_cols)
-        title = f"{y_key.replace('_', ' ').title()} by {title_dims}"
         return VisualizationConfig(
             render_chart=True,
             chart_type="table",
-            title=title,
+            title=_title(y_key, categorical_cols),
             columns=table_cols,
             data=data,
         )
 
     x_key = categorical_cols[0]
-    ranked = sorted(rows, key=lambda r: (r.get(y_key) or 0), reverse=True)[:MAX_CHART_ROWS]
-    data = [{x_key: r[x_key], y_key: float(r[y_key]) if r[y_key] is not None else None} for r in ranked]
-    is_time_series = x_key in {"sale_date", "sale_year", "sale_month", "sale_quarter"}
-    chart_type = "line" if is_time_series else "bar"
-    title = f"{y_key.replace('_', ' ').title()} by {x_key.replace('_', ' ').title()}"
+    is_time_series = x_key in _TIME_COLUMNS_FINEST_FIRST
+    if is_time_series:
+        # A trend line must be chronological - ranking by value (the old behavior)
+        # drew a zig-zag that read as a meaningless "trend".
+        ordered = sorted(rows, key=lambda r: _sort_key(r.get(x_key)))[:MAX_CHART_ROWS * 2]
+    else:
+        ordered = sorted(rows, key=lambda r: (r.get(y_key) or 0), reverse=True)[:MAX_CHART_ROWS]
+    data = [{x_key: _time_label(x_key, r[x_key]), y_key: _to_float(r[y_key])} for r in ordered]
 
     return VisualizationConfig(
         render_chart=True,
-        chart_type=chart_type,
-        title=title,
+        chart_type="line" if is_time_series else "bar",
+        title=_title(y_key, [x_key]),
         x_axis_key=x_key,
         y_axis_key=y_key,
+        columns=[x_key, y_key],
         data=data,
     )

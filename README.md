@@ -24,6 +24,7 @@ Ask questions in plain English; a Google ADK / Gemini Flash agent transforms int
 - [Architecture & Data Flow](#architecture--data-flow)
 - [Quickstart with Docker](#quickstart-with-docker)
 - [Database Connection & Schema Reference](#database-connection--schema-reference)
+- [Conversation Design (v0.2)](#-conversation-design-v02)
 - [Security Model & AST Guardrails](#security-model--ast-guardrails)
 - [Testing & Evaluation Harness](#testing--evaluation-harness)
 - [Project Structure](#project-structure)
@@ -74,7 +75,7 @@ flowchart TD
 
     subgraph BackendAPI["⚡ Backend Service (FastAPI & Python 3.11)"]
         Router["/api/query (SSE Endpoint)"]
-        SessionStore["In-Memory Session Store<br/>(Multi-Turn Context)"]
+        SessionStore["Session Store: memory / Redis<br/>(history + pending clarification)"]
         IntentClassifier{"Intent Classifier"}
         DirectResponse["Direct Answer / Clarification"]
         
@@ -124,7 +125,7 @@ flowchart TD
     
     AsyncpgClient --> NarrativeSynth
     NarrativeSynth --> ChartConfig
-    ChartConfig -->|"Live SSE Events (Status, SQL, Narrative, Chart)"| SSEClient
+    ChartConfig -->|"Live SSE Events (Steps, SQL, Narrative, Chart, Suggestions)"| SSEClient
     SSEClient --> UI
 
     classDef client fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0369a1;
@@ -361,6 +362,59 @@ ORDER BY avg_order_value DESC;
 
 ---
 
+## 💬 Conversation Design (v0.2)
+
+### Multi-turn slot filling - no more clarification loops
+When the assistant asks a follow-up question it stores a **pending clarification** (the
+partially-understood question) in session state. The next message is interpreted as the
+*answer* first - `2020`, `all time`, `by month`, `Revenue`, `yes` - and merged with the
+original question. A clarification is never asked twice in a row: if the reply still
+leaves a gap, a sensible default is used and stated in the answer.
+
+| You say | Assistant |
+|---|---|
+| `revenue` | *Follow-up:* how should I break it down? [By division] [By month in 2021] [All-time total] |
+| `2020` | Total revenue in 2020 = ... |
+| `Compare revenue per store and monthly distribution` | Revenue by district x month (top 8), multi-line chart, note that stores are grouped by district |
+| `2020` -> `go with all time` | Same breakdown, re-scoped each time (context carried over) |
+| `What is the profit by division?` | No cost data - *offers* "Total revenue by division" [Yes, show that] [No thanks] |
+| `Total revenue in 2024` | Data covers 2014-2021 - offers 2021 instead |
+| `who won the world cup?` | Can't answer; explains what it *can* answer + example chips |
+
+### Live reasoning trace ("thinking")
+Every pipeline stage streams a `step` SSE event (`running` -> `done`/`warning`/`error`):
+understanding the question -> using conversation context -> planning -> writing SQL ->
+guardrail check -> running the query -> summarizing. The UI shows this as a collapsible
+**Thinking...** panel with a shimmer and timer, collapsing to *"Thought for 1.2s"* when
+the answer starts typing (with a streaming caret). Follow-up questions from the
+assistant are rendered as a distinct, right-indented card with quick-reply chips.
+
+### SSE event contract (schema 2.1)
+`status` · `step` · `sql` · `narrative_delta` · `visualization` · `suggestions` · `metadata` · `done` | `error`
+(`: heartbeat` comment lines keep long LLM calls alive through proxies).
+
+### Running without a paid LLM key
+The default (`LLM_PROVIDER=mock`, `NLU_FALLBACK=none`) is fully deterministic, free, and
+scores 100% on the golden set. To handle phrasings the rules don't know, enable the
+**NLU fallback** - an LLM that only *rewrites* the question into the known vocabulary
+(SQL and every number stay deterministic and AST-guardrailed):
+
+| Option | Cost | `.env` |
+|---|---|---|
+| **Ollama** (local) | free, no key | `NLU_FALLBACK=openai_compatible` `NLU_BASE_URL=http://host.docker.internal:11434/v1` `NLU_MODEL=qwen2.5:3b` (run `ollama pull qwen2.5:3b` first) |
+| Groq | free tier key | `NLU_BASE_URL=https://api.groq.com/openai/v1` `NLU_MODEL=llama-3.1-8b-instant` `NLU_API_KEY=...` |
+| Gemini | free tier key | `NLU_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai` `NLU_MODEL=gemini-flash-lite-latest` `NLU_API_KEY=...` |
+
+If the LLM is slow, over quota or down, the turn degrades to the deterministic reply - it never fails.
+
+### Production settings
+- `SESSION_BACKEND=redis` + `docker compose --profile redis up -d` for multi-replica session state (JSON-serialized, TTL in Redis).
+- Per-session turn serialization, client-disconnect cancellation, input validation (length, session-id format), per-IP rate limiting, LRU-bounded in-memory stores.
+- Non-root containers, dependencies installed from `pyproject.toml`, `/livez` (liveness) and `/healthz` (readiness, checks DB).
+- New endpoints: `GET /api/capabilities`, `GET /api/session/{id}/history` (reload keeps the chat), `DELETE /api/session/{id}` (New chat).
+
+---
+
 ## 🔒 Security Model & AST Guardrails
 
 1. **Role-Based Isolation**:
@@ -455,7 +509,8 @@ Building against real 1,000,000-row retail data uncovered multiple subtle bugs t
 
 ## ⚠️ Known Limitations
 
-- **Process-Local Session Memory**: In-memory multi-turn session store is optimized for single-container setups; production multi-replica scaling would leverage Redis.
+- **Rule-based understanding by default**: without the optional NLU fallback, phrasings outside the synonym tables get an honest "can't answer + here's what I can do" reply rather than a guess.
+- **Store granularity**: individual store IDs aren't in the semantic layer, so "per store" is answered per district (disclosed in the answer).
 - **Eval Dataset Scope**: Golden evaluation set currently includes 30 representative test cases; expanding to 100+ cases is ongoing.
 - **Frontend Dependencies**: Built on Next.js 14 for stability; upgrade paths to Next.js 16 will follow upstream LTS patches.
 

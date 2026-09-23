@@ -16,6 +16,7 @@ jobs:
           cp secrets/postgres_superuser_password.txt.example secrets/postgres_superuser_password.txt
           cp secrets/agent_password.txt.example secrets/agent_password.txt
           cp secrets/refresher_password.txt.example secrets/refresher_password.txt
+          touch secrets/gemini_api_key.txt
 
       - name: Start retail_copilot_db
         run: docker compose up -d retail_copilot_db
@@ -69,6 +70,18 @@ jobs:
         with:
           node-version: "20"
       - working-directory: frontend
-        run: npm install
+        run: npm ci
+      - name: Type-check
+        working-directory: frontend
+        run: npx tsc --noEmit
       - working-directory: frontend
         run: npm run build
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image (non-root, deps from pyproject)
+        run: docker build -t copilot-backend:ci backend
+      - name: Build frontend image
+        run: docker build -t copilot-frontend:ci frontend

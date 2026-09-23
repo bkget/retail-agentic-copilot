@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = "2.1"
 
 
 def format_sse(event: str, data: dict[str, Any]) -> str:
@@ -43,3 +43,19 @@ def done_event(consolidated: dict[str, Any]) -> str:
     """Final frame carrying the fully consolidated response (schema section 6) - lets a
     client that doesn't want to assemble state from individual frames just use this one."""
     return format_sse("done", consolidated)
+
+
+def step_event(step: dict[str, Any]) -> str:
+    """One entry of the live reasoning trace ({id, label, detail, status, elapsed_ms}).
+    Emitted with status "running" when a stage starts and again when it finishes - the
+    client upserts by id, which is what drives the "Thinking..." panel."""
+    return format_sse("step", step)
+
+
+def suggestions_event(items: list[str], response_type: str) -> str:
+    return format_sse("suggestions", {"items": items, "response_type": response_type})
+
+
+def heartbeat_comment() -> str:
+    """SSE comment line - keeps proxies from closing an idle stream; ignored by parsers."""
+    return ": heartbeat\n\n"

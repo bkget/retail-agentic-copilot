@@ -76,14 +76,25 @@ install: ## Install backend dependencies locally
 ## -----------------------------------------------------------------------------
 
 .PHONY: up
-up: init-env init-secrets ## Build and launch full container stack (DB + Backend + Frontend)
+up: init-env init-secrets ## Launch full container stack (builds only if missing)
 	@echo -e "${YELLOW}Starting container fleet (retail_copilot_db, retail_copilot_backend, retail_copilot_frontend)...${RESET}"
-	$(DOCKER_COMPOSE) up -d --build
+	$(DOCKER_COMPOSE) up -d
 	@echo -e "${GREEN}✓ Containers launched.${RESET}"
 	@echo -e "${BLUE}  • Frontend UI:${RESET}   http://localhost:3000"
 	@echo -e "${BLUE}  • Backend Docs:${RESET}  http://localhost:8000/docs"
 	@echo -e "${BLUE}  • Health Check:${RESET}  http://localhost:8000/healthz"
 	@echo -e "${BLUE}  • PostgreSQL DB:${RESET} localhost:5433 (retail_copilot_db)"
+
+.PHONY: build
+build: ## Build or rebuild container images
+	@echo -e "${YELLOW}Building container images...${RESET}"
+	$(DOCKER_COMPOSE) build
+
+.PHONY: up-build
+up-build: init-env init-secrets ## Force rebuild images and start containers
+	@echo -e "${YELLOW}Rebuilding and launching containers...${RESET}"
+	$(DOCKER_COMPOSE) up -d --build
+	@echo -e "${GREEN}✓ Containers rebuilt and launched.${RESET}"
 
 .PHONY: down
 down: ## Stop and remove all containers and network bridges

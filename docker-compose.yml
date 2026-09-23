@@ -8,9 +8,6 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
       POSTGRES_AGENT_PASSWORD_FILE: /run/secrets/agent_password
       POSTGRES_REFRESHER_PASSWORD_FILE: /run/secrets/refresher_password
-      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-}
-      POSTGRES_AGENT_PASSWORD: ${POSTGRES_AGENT_PASSWORD:-}
-      POSTGRES_REFRESHER_PASSWORD: ${POSTGRES_REFRESHER_PASSWORD:-}
     secrets:
       - postgres_superuser_password
       - agent_password
@@ -22,17 +19,19 @@ services:
       - ./db/init:/docker-entrypoint-initdb.d:ro
       - ./db/seed:/seed:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ecommerce}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ecommerce}"]
       interval: 5s
       timeout: 5s
       retries: 10
-      start_period: 30s
+      start_period: 300s
     restart: unless-stopped
 
   retail_copilot_backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        EXTRAS: ${BACKEND_EXTRAS:-redis} # add ",gemini" only if LLM_PROVIDER=gemini
     container_name: retail_copilot_backend
     environment:
       POSTGRES_HOST: retail_copilot_db
@@ -47,6 +46,19 @@ services:
       GEMINI_API_KEY_FILE: /run/secrets/gemini_api_key
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-lite-latest}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-'["http://localhost:3000"]'}
+      # Conversation memory: "memory" (single replica) or "redis" (run with --profile redis)
+      SESSION_BACKEND: ${SESSION_BACKEND:-memory}
+      REDIS_URL: ${REDIS_URL:-redis://retail_copilot_redis:6379/0}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-1800}
+      # Optional free LLM fallback for unusual phrasings (never generates SQL or numbers).
+      # none | openai_compatible  - see README "Running without a paid LLM key".
+      NLU_FALLBACK: ${NLU_FALLBACK:-none}
+      NLU_BASE_URL: ${NLU_BASE_URL:-http://host.docker.internal:11434/v1}
+      NLU_MODEL: ${NLU_MODEL:-qwen2.5:3b}
+      NLU_API_KEY: ${NLU_API_KEY:-}
+      NARRATIVE_STREAM_DELAY_MS: ${NARRATIVE_STREAM_DELAY_MS:-18}
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # lets the container reach Ollama on the host (Linux)
     secrets:
       - agent_password
       - refresher_password
@@ -58,12 +70,25 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  retail_copilot_redis:
+    image: redis:7-alpine
+    container_name: retail_copilot_redis
+    profiles: ["redis"]
+    command: ["redis-server", "--save", "60", "1", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   retail_copilot_frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000} # Browser reachable API URL
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-} # empty = same-origin via the Next.js /api proxy
+        BACKEND_INTERNAL_URL: http://retail_copilot_backend:8000
     container_name: retail_copilot_frontend
     ports:
       - "${FRONTEND_HOST_PORT:-3000}:3000"

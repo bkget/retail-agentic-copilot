@@ -36,6 +36,11 @@ class ConversationTurn:
     # Cached so "explain the above result" can replay it without re-running a query -
     # None for conversational/clarification turns, where there's nothing to cache.
     narrative_text: str | None = None
+    # "query" | "conversational" | "clarification" - lets the UI restyle a rehydrated
+    # clarifying question the same way it was shown live.
+    response_type: str | None = None
+    visualization: dict | None = None
+    suggestions: tuple[str, ...] = ()
 
 
 @dataclass
@@ -49,6 +54,23 @@ class SessionState:
     last_year: int | None = None  # time-range slot, tracked separately from active_filters
     active_filters: dict[str, "_NamedFilter"] = field(default_factory=dict)  # column -> named filter
     output_preference: str = "grouped"  # "grouped" | "table"
+    # Second GROUP BY column paired with last_dimension (a time dimension, or the
+    # finer level of a hierarchy - e.g. store_district under store_division).
+    last_extra_dimension: str | None = None
+    # Set when the previous assistant turn asked a clarifying question - the next
+    # user message is interpreted as an answer to it first (slot filling), which is
+    # what stops "2020" / "all time" from being read as brand-new, context-free
+    # questions and re-triggering the same clarification forever.
+    pending: "PendingClarification | None" = None
+
+
+@dataclass(frozen=True)
+class PendingClarification:
+    kind: str  # "breakdown" | "metric" | "confirm_rewrite"
+    original_question: str
+    partial: "ResolvedQuery"
+    proposed_question: str | None = None  # only for confirm_rewrite
+    attempts: int = 1
 
 
 # SessionContext (history + state bundle) lives in app.session.store, not here - it's
@@ -113,6 +135,12 @@ class TermMappingResult:
     # every existing single-year call site is unaffected.
     years: tuple[int, ...]
     top_n: int | None
+    # Second GROUP BY column (see SessionState.last_extra_dimension).
+    extra_dimension: str | None = None
+    # The message explicitly asked for no time restriction ("all time", "overall").
+    all_time: bool = False
+    # Human-readable assumptions made while mapping (surfaced in the answer).
+    notes: tuple[str, ...] = ()
 
 
 # ============================================================================
@@ -135,6 +163,15 @@ class ResolvedQuery:
     top_n: int | None = None
     is_listing: bool = False
     listing_dimension: str | None = None
+    extra_dimension: str | None = None
+    # Assumptions stated alongside the answer ("stores are grouped by district").
+    notes: tuple[str, ...] = ()
+    # For dimension x time results: restrict to the top-N series by the metric so the
+    # result stays chartable and never silently truncates at the row limit.
+    series_limit: int | None = None
+    # e.g. "2014-2021" - set by the orchestrator when no year filter applies, so the
+    # narrative states the period instead of leaving "all time" implicit.
+    period_label: str | None = None
 
 
 def resolve_with_session(
@@ -163,6 +200,7 @@ def resolve_with_session(
 
     metric_alias = mapping.metric_intent
     dimension = mapping.compare_dimension or mapping.dimension_intent
+    extra_dimension = mapping.extra_dimension if dimension else None
     year = mapping.year
     # 2+ years mentioned in THIS message is unambiguous and self-contained - never
     # inherited from state (there's nothing to inherit; it's already complete).
@@ -178,7 +216,8 @@ def resolve_with_session(
             metric_alias = state.last_metric_alias
         if dimension is None:
             dimension = state.last_dimension
-        if year is None and not years:
+            extra_dimension = state.last_extra_dimension
+        if year is None and not years and not mapping.all_time:
             year = state.last_year
         for column, named_filter in state.active_filters.items():
             filters_by_column.setdefault(column, named_filter)
@@ -190,6 +229,8 @@ def resolve_with_session(
         year=year,
         years=years,
         top_n=mapping.top_n,
+        extra_dimension=extra_dimension if extra_dimension != dimension else None,
+        notes=mapping.notes,
     )
 
 
@@ -292,10 +333,26 @@ _DIMENSION_SYNONYMS: list[tuple[str, tuple[str, ...]]] = [
     ),
     ("item_name", ("item", "product", "sku", "article")),
     ("payment_type", ("payment", "payment method", "payment channel", "tender type")),
-    ("sale_quarter", ("quarter",)),
-    ("sale_month", ("month",)),
-    ("sale_year", ("year",)),
+    ("sale_quarter", ("quarter", "quarterly")),
+    ("sale_month", ("month", "monthly")),
+    ("sale_year", ("year", "yearly", "annual", "annually")),
+    # Deliberately last (lowest priority): store IDs aren't exposed by the semantic
+    # layer, so "per store" is approximated by the finest store-location level in the
+    # Tier 1 rollup - and that approximation is stated in the answer (see notes).
+    ("store_district", ("store", "shop", "outlet", "branch")),
 ]
+
+_TIME_DIMENSION_COLUMNS = ("sale_month", "sale_quarter", "sale_year")
+_STORE_WORDS = ("store", "shop", "outlet", "branch")
+_HIERARCHY_PAIRS = {("store_division", "store_district")}
+# High-cardinality dimensions get their series capped when crossed with time.
+_SERIES_CAPPED_DIMENSIONS = {
+    "store_district", "item_name", "item_supplier", "payment_bank", "item_manufacturer_country",
+}
+DEFAULT_SERIES_LIMIT = 8
+_ALL_TIME_RE = re.compile(
+    r"\ball[\s-]*time\b|\boverall\b|\ball (the )?years\b|\bevery year\b|\blifetime\b"
+)
 
 # "average"/"avg" checked first and deliberately: it must win over a coincidental
 # whole-word match like "order" inside "average order value" - table order here is
@@ -360,7 +417,9 @@ _CAPABILITY_PHRASES = (
     # in a genuine sales question, but do in real phrasings of "what can I ask" that
     # don't happen to match the literal multi-word phrases above verbatim - e.g. "what
     # ARE THE columns..." doesn't contain the literal substring "what columns".
-    "columns", "questions",
+    "columns", "question",
+    "what can you answer", "what do you know", "what should i ask", "how do i use",
+    "how does this work", "who are you", "what are you",
 )
 _SCHEMA_INFO_PHRASES = _DATA_COVERAGE_PHRASES + _CAPABILITY_PHRASES
 
@@ -555,6 +614,37 @@ def _extract_named_filters(
     return filters, consumed_dimensions, compare_dimension
 
 
+def _pick_dimensions(matched: list[str]) -> tuple[str | None, str | None]:
+    """Primary GROUP BY column plus an optional second one. A second dimension is only
+    accepted when the pair is meaningful: <entity> x <time> ("revenue per store by
+    month") or a known hierarchy ("per division and district"). Anything else keeps
+    the old single-dimension behavior - e.g. "payment bank" matching both payment_bank
+    and payment_type must not become a two-column breakdown."""
+    if not matched:
+        return None, None
+    non_time = [c for c in matched if c not in _TIME_DIMENSION_COLUMNS]
+    time = [c for c in matched if c in _TIME_DIMENSION_COLUMNS]
+    if non_time:
+        primary = non_time[0]
+        if time:
+            return primary, time[0]
+        for other in non_time[1:]:
+            if (primary, other) in _HIERARCHY_PAIRS:
+                return primary, other
+            if (other, primary) in _HIERARCHY_PAIRS:
+                return other, primary
+        return primary, None
+    return time[0], None
+
+
+def series_limit_for(dimension: str | None, extra_dimension: str | None, top_n: int | None) -> int | None:
+    if not (dimension and extra_dimension and extra_dimension in _TIME_DIMENSION_COLUMNS):
+        return None
+    if top_n:
+        return top_n
+    return DEFAULT_SERIES_LIMIT if dimension in _SERIES_CAPPED_DIMENSIONS else None
+
+
 def _metric_sql_expr(metric_alias: str, use_tier2: bool) -> str:
     exprs = {
         "avg_revenue": "AVG(total_price)" if use_tier2 else "AVG(total_revenue)",
@@ -575,12 +665,17 @@ class MockLLMProvider(LLMProvider):
     async def classify_input(self, question: str) -> ClassificationResult:
         q = question.lower().strip()
 
-        if _any_word_in(_GREETING_WORDS, q):
+        shape = _classify_query_shape(q)
+        has_analytic_signal = shape[0] or shape[1] or _YEAR_RE.search(q) is not None
+
+        if _any_word_in(_GREETING_WORDS, q) and not has_analytic_signal:
             return ClassificationResult(
                 Intent.GREETING, 1.0, ExtractedSignals(False, False, False, False, False)
             )
 
-        if _any_word_in(_SCHEMA_INFO_PHRASES, q):
+        if _any_word_in(_DATA_COVERAGE_PHRASES, q) or (
+            _any_word_in(_CAPABILITY_PHRASES, q) and not shape[0]
+        ):
             return ClassificationResult(
                 Intent.SCHEMA_INFO, 1.0, ExtractedSignals(False, False, False, False, False)
             )
@@ -634,14 +729,22 @@ class MockLLMProvider(LLMProvider):
         # happens to appear in the same sentence).
         filters, consumed_dimensions, compare_dimension = _extract_named_filters(question, catalog)
 
-        dimension_intent: str | None = None
+        matched_dims: list[str] = []
         for column, words in _DIMENSION_SYNONYMS:
             for word in words:
                 if _word_in(word, q):
                     mappings.append(ColumnMapping(column, 1.0 if word == words[0] else 0.85))
-                    if dimension_intent is None and column not in consumed_dimensions:
-                        dimension_intent = column
+                    if column not in consumed_dimensions and column not in matched_dims:
+                        matched_dims.append(column)
                     break
+        dimension_intent, extra_dimension = _pick_dimensions(matched_dims)
+        notes: list[str] = []
+        if "store_district" in (dimension_intent, extra_dimension) and not _word_in("district", q) \
+                and _any_word_in(_STORE_WORDS, q):
+            notes.append(
+                "Individual store IDs aren't part of the analytics layer, so stores are "
+                "grouped by district (the finest store location available)."
+            )
 
         metric_intent: str | None = None
         for alias, words in _METRIC_SYNONYMS:
@@ -666,6 +769,9 @@ class MockLLMProvider(LLMProvider):
             year=years[0] if len(years) == 1 else None,
             years=years,
             top_n=int(top_n_match.group(1)) if top_n_match else None,
+            extra_dimension=extra_dimension,
+            all_time=_ALL_TIME_RE.search(q) is not None,
+            notes=tuple(notes),
         )
 
     async def generate_sql(
@@ -685,6 +791,7 @@ class MockLLMProvider(LLMProvider):
         use_tier2 = (
             metric_alias == "avg_revenue"
             or resolved.dimension in _TIER2_ONLY_DIMENSIONS
+            or resolved.extra_dimension in _TIER2_ONLY_DIMENSIONS
             or any(f.column in _TIER2_ONLY_DIMENSIONS for f in resolved.filters)
         )
         table = "public.mv_sales_analysis" if use_tier2 else "public.mv_sales_daily_rollup"
@@ -697,7 +804,27 @@ class MockLLMProvider(LLMProvider):
             where_parts.append(f"sale_year IN ({', '.join(str(y) for y in resolved.years)})")
         elif resolved.year is not None:
             where_parts.append(f"sale_year = {resolved.year}")
+        base_where = list(where_parts)
+        if resolved.extra_dimension and resolved.series_limit and resolved.dimension:
+            dim = resolved.dimension
+            sub_where = f" WHERE {' AND '.join(base_where)}" if base_where else ""
+            where_parts.append(
+                f"{dim} IN (SELECT {dim} FROM {table}{sub_where} GROUP BY {dim} "
+                f"ORDER BY {metric_expr} DESC LIMIT {resolved.series_limit})"
+            )
         where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+        if resolved.extra_dimension and resolved.dimension:
+            cols = [resolved.dimension, resolved.extra_dimension]
+            parts = [
+                f"SELECT {', '.join(cols)}, {metric_expr} AS {metric_alias}",
+                f"FROM {table}",
+            ]
+            if where_clause:
+                parts.append(where_clause)
+            parts.append(f"GROUP BY {', '.join(cols)}")
+            parts.append(f"ORDER BY {', '.join(cols)}")
+            return " ".join(parts)
 
         # A multi-year comparison adds sale_year as its own GROUP BY column alongside
         # any other explicit dimension (not instead of it) - "revenue by quarter for
