@@ -57,7 +57,7 @@ def _title(y_key: str, dims: list[str]) -> str:
 @dataclass(frozen=True)
 class VisualizationConfig:
     render_chart: bool
-    chart_type: str | None = None  # "bar" | "line" | "multi_line" | "table"
+    chart_type: str | None = None  # "bar" | "line" | "multi_line" | "grouped_bar" | "table"
     title: str | None = None
     x_axis_key: str | None = None  # bar/line/multi_line
     y_axis_key: str | None = None  # bar/line (metric column); multi_line: metric name
@@ -113,6 +113,46 @@ def _multi_line(x_key: str, series_key: str, y_key: str, rows: list[dict]) -> Vi
     )
 
 
+MAX_GROUPED_BAR_ENTITIES = 12
+
+
+def _year_comparison(key_cols: list[str], y_key: str, rows: list[dict]) -> VisualizationConfig:
+    """Entity x year results pivoted to one row per entity with a column per year (and
+    a change % when exactly two years are compared) - so every value is unambiguously
+    tied to its year. Few entities -> grouped bar chart (bars side by side per year);
+    many -> a sortable comparison table. Rows are ordered by the latest year, desc."""
+    years = sorted({r["sale_year"] for r in rows if r.get("sale_year") is not None})
+    year_keys = [str(y) for y in years]
+    pivot: dict[tuple, dict] = {}
+    for r in rows:
+        key = tuple(r[c] for c in key_cols)
+        entry = pivot.setdefault(key, {c: r[c] for c in key_cols})
+        entry[str(r["sale_year"])] = _to_float(r[y_key])
+    change_key = None
+    if len(years) == 2:
+        change_key = "change_pct"
+        a, b = year_keys
+        for entry in pivot.values():
+            v1, v2 = entry.get(a), entry.get(b)
+            entry[change_key] = round((v2 - v1) / v1 * 100, 1) if v1 and v2 is not None else None
+    latest = year_keys[-1]
+    data = sorted(pivot.values(), key=lambda e: e.get(latest) or 0, reverse=True)
+    columns = [*key_cols, *year_keys] + ([change_key] if change_key else [])
+    title = f"{y_key.replace('_', ' ').title()}: {' vs '.join(year_keys)} by " + " & ".join(
+        c.replace("_", " ").title() for c in key_cols
+    )
+    if len(key_cols) == 1 and len(data) <= MAX_GROUPED_BAR_ENTITIES:
+        return VisualizationConfig(
+            render_chart=True, chart_type="grouped_bar", title=title, x_axis_key=key_cols[0],
+            y_axis_key=y_key, columns=columns, data=data, series_keys=year_keys,
+        )
+    # Hierarchy (division > district): chart the finest level, keep both in the table.
+    return VisualizationConfig(
+        render_chart=True, chart_type="table", title=title, x_axis_key=key_cols[-1],
+        y_axis_key=y_key, columns=columns, data=data[:MAX_TABLE_ROWS], series_keys=year_keys,
+    )
+
+
 def build_visualization(columns: list[str], rows: list[dict]) -> VisualizationConfig:
     if not rows:
         return VisualizationConfig(render_chart=False)
@@ -124,6 +164,15 @@ def build_visualization(columns: list[str], rows: list[dict]) -> VisualizationCo
         return VisualizationConfig(render_chart=False)
 
     y_key = numeric_cols[-1]
+
+    others = [c for c in categorical_cols if c != "sale_year"]
+    if (
+        "sale_year" in categorical_cols
+        and others
+        and not any(c in _TIME_COLUMNS_FINEST_FIRST for c in others)
+        and len({r.get("sale_year") for r in rows}) >= 2
+    ):
+        return _year_comparison(others, y_key, rows)
 
     if len(categorical_cols) == 2:
         time_cols = [c for c in _TIME_COLUMNS_FINEST_FIRST if c in categorical_cols]

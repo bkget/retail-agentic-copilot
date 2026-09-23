@@ -379,6 +379,7 @@ leaves a gap, a sensible default is used and stated in the answer.
 | `2020` -> `go with all time` | Same breakdown, re-scoped each time (context carried over) |
 | `What is the profit by division?` | No cost data - *offers* "Total revenue by division" [Yes, show that] [No thanks] |
 | `Total revenue in 2024` | Data covers 2014-2021 - offers 2021 instead |
+| `Compare 2019 and 2020` (after a breakdown) | One row per entity with **2019 \| 2020 \| Change %**; grouped bars (<=12 entities) or a comparison table; narrative states each year's figure and the biggest movers |
 | `who won the world cup?` | Can't answer; explains what it *can* answer + example chips |
 
 ### Live reasoning trace ("thinking")

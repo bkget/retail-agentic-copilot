@@ -268,3 +268,40 @@ class TestContinuousSession:
         assert "GROUP BY store_division, store_district" in result.sql_executed
         assert "DHAKA DHAKA" not in result.narrative_text
         assert "(DHAKA)" in result.narrative_text
+
+
+class TestYearComparison:
+    """User report: after a division x district answer, "Compare 2019 and 2020" showed one
+    Total Revenue column - both years silently summed together, no way to tell which
+    year a number belonged to."""
+
+    async def test_compare_years_after_hierarchy_groups_by_year_and_pivots(self, orchestrator, catalog):
+        sid = "yoy-1"
+        await orchestrator.answer("Total revenue per division and district in 2020", catalog, sid)
+        result = await orchestrator.answer("Compare 2019 and 2020", catalog, sid)
+        assert result.response_type == "query"
+        assert "sale_year IN (2019, 2020)" in result.sql_executed
+        assert "GROUP BY store_division, store_district, sale_year" in result.sql_executed
+        viz = result.visualization
+        assert viz.columns == ["store_division", "store_district", "2019", "2020", "change_pct"]
+        assert len(viz.data) == 64  # one row per district, not per district-year
+        dhaka = next(r for r in viz.data if r["store_district"] == "DHAKA")
+        assert dhaka["2019"] and dhaka["2020"] and dhaka["2019"] != dhaka["2020"]
+        assert "in 2019" in result.narrative_text and "in 2020" in result.narrative_text
+        assert "Biggest increase" in result.narrative_text
+
+    async def test_few_entities_render_as_grouped_bars(self, orchestrator, catalog):
+        result = await orchestrator.answer("Compare total revenue by division for 2019 and 2020", catalog, "yoy-2")
+        viz = result.visualization
+        assert viz.chart_type == "grouped_bar"
+        assert viz.series_keys == ["2019", "2020"]
+        assert len(viz.data) == 7
+        # Ordered by the latest year so the ranking reads top-down.
+        assert viz.data[0]["2020"] >= viz.data[-1]["2020"]
+
+    async def test_per_year_totals_match_single_year_queries(self, orchestrator, catalog):
+        both = await orchestrator.answer("Compare total revenue by division for 2019 and 2020", catalog, "yoy-3")
+        only_2020 = await orchestrator.answer("Total revenue by division in 2020", catalog, "yoy-4")
+        by_div_2020 = {r["store_division"]: r["2020"] for r in both.visualization.data}
+        for r in only_2020.visualization.data:
+            assert abs(by_div_2020[r["store_division"]] - r["total_revenue"]) < 0.01

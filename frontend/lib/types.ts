@@ -1,6 +1,6 @@
 // Mirrors backend/app/sse/events.py and backend/app/main.py. Keep in sync by hand.
 
-export type ChartType = "bar" | "line" | "multi_line" | "table";
+export type ChartType = "bar" | "line" | "multi_line" | "grouped_bar" | "table";
 
 export interface VisualizationConfig {
   render_chart: boolean;

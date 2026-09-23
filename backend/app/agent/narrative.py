@@ -122,6 +122,78 @@ def _describe_scope(resolved: ResolvedQuery) -> str:
     return " for " + ", ".join(parts) + period
 
 
+def _entity_label(row: dict, key_cols: list[str]) -> str:
+    if key_cols == ["store_division", "store_district"]:
+        return f"{row['store_district']} ({row['store_division']})"
+    return " ".join(format_dimension_value(c, row[c]) for c in key_cols)
+
+
+def _year_comparison_narrative(
+    resolved: ResolvedQuery, rows: list[dict], key_cols: list[str], metric_col: str, fmt,
+    currency_prefix: str, label: str,
+) -> str:
+    """"Compare 2019 and 2020 by X": every figure is stated with its year, plus the
+    overall change and the biggest movers - never a single number summed across years."""
+    years = sorted({r["sale_year"] for r in rows if r.get("sale_year") is not None})
+    first, last = years[0], years[-1]
+    per_entity: dict[str, dict[int, float]] = {}
+    per_year: dict[int, float] = {}
+    for r in rows:
+        v = r.get(metric_col)
+        if v is None:
+            continue
+        name = _entity_label(r, key_cols)
+        per_entity.setdefault(name, {})[r["sale_year"]] = float(v)
+        per_year[r["sale_year"]] = per_year.get(r["sale_year"], 0.0) + float(v)
+
+    dims = "district (within each division)" if key_cols == ["store_division", "store_district"] else \
+        " and ".join(c.replace("store_", "").replace("item_", "").replace("_", " ") for c in key_cols)
+    money = lambda v: f"{currency_prefix}{fmt(v)}"  # noqa: E731
+    year_list = " and ".join(str(y) for y in years)
+    sentences: list[str] = []
+    if not resolved.top_n and first in per_year and last in per_year:
+        change = ""
+        if per_year[first]:
+            pct = (per_year[last] - per_year[first]) / per_year[first] * 100
+            change = f" ({'up' if pct >= 0 else 'down'} {abs(pct):.1f}%)"
+        sentences.append(
+            f"Comparing {label} by {dims} for {year_list}: overall it went from "
+            f"{money(per_year[first])} in {first} to {money(per_year[last])} in {last}{change}."
+        )
+    else:
+        sentences.append(f"Comparing {label} by {dims} for {year_list}.")
+
+    leaders = sorted(per_entity.items(), key=lambda kv: kv[1].get(last, 0.0), reverse=True)
+    if leaders:
+        name, vals = leaders[0]
+        prev = f" (vs {money(vals[first])} in {first})" if first in vals else ""
+        sentences.append(f"**{name}** was the highest in {last} with {money(vals.get(last, 0.0))}{prev}.")
+
+    if len(years) == 2 and not resolved.top_n:
+        changes = [
+            (n, (v[last] - v[first]) / v[first] * 100)
+            for n, v in per_entity.items() if v.get(first) and last in v
+        ]
+        if len(changes) >= 2:
+            # Changes that round to 0.0% are "flat", not an increase/decrease - saying
+            # "biggest decrease: X (-0.0%)" when nothing fell would mislead.
+            up = max(changes, key=lambda c: c[1])
+            down = min(changes, key=lambda c: c[1])
+            unit = dims.split(" (")[0]
+            parts = []
+            if up[1] >= 0.05:
+                parts.append(f"Biggest increase: **{up[0]}** ({up[1]:+.1f}%)")
+            if down[1] <= -0.05:
+                parts.append(f"biggest decrease: **{down[0]}** ({down[1]:+.1f}%)")
+            elif up[1] >= 0.05:
+                parts.append(f"no {unit} declined")
+            if not parts:
+                parts.append(f"Every {unit} was essentially flat between {first} and {last}")
+            text = "; ".join(parts)
+            sentences.append(text[0].upper() + text[1:] + ".")
+    return " ".join(sentences)
+
+
 def _series_by_time_narrative(
     resolved: ResolvedQuery, rows: list[dict], metric_col: str, fmt, currency_prefix: str, label: str
 ) -> str:
@@ -220,6 +292,16 @@ def build_narrative(resolved: ResolvedQuery, columns: list[str], rows: list[dict
     if not categorical_cols or len(rows) == 1:
         total = sum(values)
         text = f"The {label}{scope} is {currency_prefix}{fmt(total)}."
+        return NarrativeResult(text=_with_notes(text, resolved), formatting=formatting)
+
+    others = [c for c in categorical_cols if c != "sale_year"]
+    if (
+        "sale_year" in categorical_cols
+        and others
+        and not any(c in _TIME_COLUMNS for c in others)
+        and len(resolved.years) >= 2
+    ):
+        text = _year_comparison_narrative(resolved, rows, others, metric_col, fmt, currency_prefix, label)
         return NarrativeResult(text=_with_notes(text, resolved), formatting=formatting)
 
     if (

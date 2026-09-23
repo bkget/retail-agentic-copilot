@@ -1026,3 +1026,28 @@ body {
   height: 1px;
   scroll-margin-bottom: 150px;
 }
+
+/* Numeric columns right-aligned so values (and year-vs-year pairs) line up. */
+.viz-table th.is-num,
+.viz-table td.is-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.change-cell {
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.change-cell.is-up {
+  color: #1f8a5b;
+}
+
+.change-cell.is-down {
+  color: var(--status-critical);
+}
+
+:root[data-theme="dark"] .change-cell.is-up {
+  color: #4cc38a;
+}

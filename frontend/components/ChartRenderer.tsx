@@ -56,7 +56,20 @@ function formatCell(value: string | number | null | undefined, column: string, i
 }
 
 function prettyHeader(c: string): string {
+  if (c === "change_pct") return "Change";
   return c.replace(/^(sale|store|item|payment)_/, "").replace(/_/g, " ");
+}
+
+function ChangeCell({ value }: { value: string | number | null | undefined }) {
+  if (typeof value !== "number") return <span className="change-cell">–</span>;
+  const cls = value > 0 ? "is-up" : value < 0 ? "is-down" : "";
+  const arrow = value > 0 ? "▲" : value < 0 ? "▼" : "";
+  return (
+    <span className={`change-cell ${cls}`}>
+      {arrow} {value > 0 ? "+" : ""}
+      {value.toFixed(1)}%
+    </span>
+  );
 }
 
 export function ChartRenderer({ config }: { config: VisualizationConfig }) {
@@ -73,7 +86,11 @@ export function ChartRenderer({ config }: { config: VisualizationConfig }) {
   // First column(s) are dimensions; for multi_line every column after the x key is a
   // metric series.
   const metricCols = new Set(
-    chart_type === "multi_line" ? columns.slice(1) : columns.slice(-1)
+    config.series_keys && config.series_keys.length > 0
+      ? config.series_keys
+      : chart_type === "multi_line"
+        ? columns.slice(1)
+        : columns.slice(-1)
   );
 
   const header = (
@@ -105,7 +122,9 @@ export function ChartRenderer({ config }: { config: VisualizationConfig }) {
             <thead>
               <tr>
                 {columns.map((c) => (
-                  <th key={c}>{prettyHeader(c)}</th>
+                  <th key={c} className={metricCols.has(c) || c === "change_pct" ? "is-num" : undefined}>
+                    {prettyHeader(c)}
+                  </th>
                 ))}
               </tr>
             </thead>
@@ -113,7 +132,9 @@ export function ChartRenderer({ config }: { config: VisualizationConfig }) {
               {data.map((row, i) => (
                 <tr key={i}>
                   {columns.map((c) => (
-                    <td key={c}>{formatCell(row[c], c, metricCols.has(c))}</td>
+                    <td key={c} className={metricCols.has(c) || c === "change_pct" ? "is-num" : undefined}>
+                      {c === "change_pct" ? <ChangeCell value={row[c]} /> : formatCell(row[c], c, metricCols.has(c))}
+                    </td>
                   ))}
                 </tr>
               ))}
@@ -165,6 +186,38 @@ export function ChartRenderer({ config }: { config: VisualizationConfig }) {
               />
             ))}
           </LineChart>
+        </ResponsiveContainer>
+      </div>
+    );
+  }
+
+  if (chart_type === "grouped_bar") {
+    // Year-over-year comparison: one bar per year, side by side for each entity.
+    const series = config.series_keys ?? [];
+    const many = data.length > 6;
+    return (
+      <div className="viz">
+        {header}
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart data={data} margin={{ top: 4, right: 12, left: 0, bottom: 4 }} barGap={2}>
+            <CartesianGrid stroke={gridColor} vertical={false} />
+            <XAxis
+              dataKey={xKey}
+              tick={{ fill: AXIS_COLOR, fontSize: 11 }}
+              axisLine={{ stroke: gridColor }}
+              tickLine={false}
+              interval={0}
+              angle={many ? -30 : 0}
+              textAnchor={many ? "end" : "middle"}
+              height={many ? 56 : 30}
+            />
+            <YAxis {...axisProps} />
+            {tooltip}
+            <Legend wrapperStyle={{ fontSize: 12, paddingTop: 6 }} />
+            {series.map((s, i) => (
+              <Bar key={s} dataKey={s} name={s} fill={palette[i % palette.length]} radius={[3, 3, 0, 0]} maxBarSize={28} />
+            ))}
+          </BarChart>
         </ResponsiveContainer>
       </div>
     );

@@ -816,6 +816,10 @@ class MockLLMProvider(LLMProvider):
 
         if resolved.extra_dimension and resolved.dimension:
             cols = [resolved.dimension, resolved.extra_dimension]
+            if len(resolved.years) >= 2 and "sale_year" not in cols:
+                # Comparing years: without sale_year in the GROUP BY each row would
+                # silently sum all compared years together.
+                cols.append("sale_year")
             parts = [
                 f"SELECT {', '.join(cols)}, {metric_expr} AS {metric_alias}",
                 f"FROM {table}",

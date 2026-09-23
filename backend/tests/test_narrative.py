@@ -168,3 +168,17 @@ def test_time_series_line_is_chronological_not_ranked():
     viz = build_visualization(["sale_month", "total_revenue"], rows)
     assert viz.chart_type == "line"
     assert [d["sale_month"] for d in viz.data] == ["Jan", "Feb", "Mar"]
+
+
+def test_year_comparison_does_not_report_a_decrease_when_nothing_fell():
+    resolved = ResolvedQuery(metric_alias="total_revenue", dimension="store_division", years=(2019, 2020))
+    rows = [
+        {"store_division": "A", "sale_year": 2019, "total_revenue": 100.0},
+        {"store_division": "A", "sale_year": 2020, "total_revenue": 110.0},
+        {"store_division": "B", "sale_year": 2019, "total_revenue": 100.0},
+        {"store_division": "B", "sale_year": 2020, "total_revenue": 100.001},
+    ]
+    text = build_narrative(resolved, ["store_division", "sale_year", "total_revenue"], rows).text
+    assert "decrease" not in text
+    assert "no division declined" in text
+    assert "in 2019" in text and "in 2020" in text
